@@ -6,6 +6,18 @@ Shirushi v0.1 Previewは、画像へAI利用に関する意思を機械可読な
 
 C2PA、CAWG Rights、TrustMarkを利用しています。これらの仕様を詳しく知らなくても、GUIから画像を選び、意思表示の付与と確認を行えます。
 
+## ダウンロード
+
+Windows 64bit版のShirushi v0.1 Previewは、次のZIPファイルからダウンロードできます。
+
+[Shirushi v0.1 Previewをダウンロード](https://github.com/shota0e0/shirushi/releases/download/v0.1.0-preview/shirushi-v0.1-preview-windows-x64.zip)
+
+1. ZIPファイルをダウンロードします。
+2. ZIPファイルを展開します。
+3. 展開したフォルダー内の`Shirushi.exe`を起動します。
+
+GitHubの「Code」から選べる「Download ZIP」はソースコードです。アプリを使う場合は、上記のRelease版ZIPをダウンロードしてください。
+
 ## Release版を起動する
 
 Shirushi v0.1 Previewの配布パッケージは、Windows x64向けのZIP形式です。インストーラーは使用しません。
