@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "trustmarkVersion": "0.9.0",
+  "variant": "P",
+  "officialBaseUrl": "https://cc-assets.netlify.app/watermarking/trustmark-models/",
+  "resources": [
+    {
+      "filename": "trustmark_P.yaml",
+      "size": 2009,
+      "md5": "fe40df84a7feeebfceb7a7678d7e6ec6",
+      "sha256": "43f37103f92efa8bd6b1c5902bb537cc12a981dc699fca19d9bb7de8c62d03d9",
+      "url": "https://cc-assets.netlify.app/watermarking/trustmark-models/trustmark_P.yaml",
+      "purpose": "TrustMark P encoder and decoder configuration"
+    },
+    {
+      "filename": "decoder_P.ckpt",
+      "size": 47647180,
+      "md5": "9450972bc0c3c217cb7b8220dd2f7a3c",
+      "sha256": "f5f1d570c889c5908c6e4a28c07dc90cf33990ebaf24037254ebe0b8849b1bdc",
+      "url": "https://cc-assets.netlify.app/watermarking/trustmark-models/decoder_P.ckpt",
+      "purpose": "TrustMark P decoder weights"
+    },
+    {
+      "filename": "encoder_P.ckpt",
+      "size": 17301306,
+      "md5": "0a18f6de6d57c6ef7dda30ce6154a775",
+      "sha256": "659d427f72d16eea4e8fbda175ae72e3a78830dc6cf44b63642a5a4b28a2b4e2",
+      "url": "https://cc-assets.netlify.app/watermarking/trustmark-models/encoder_P.ckpt",
+      "purpose": "TrustMark P encoder weights"
+    }
+  ]
+}

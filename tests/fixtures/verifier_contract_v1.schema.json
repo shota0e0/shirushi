@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rights-signal-lab.local/schema/verifier-contract-v1.json",
+  "title": "rights-signal-lab verifier contract v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "result",
+    "reasonCode",
+    "message",
+    "input",
+    "rights",
+    "trustmark",
+    "softBinding",
+    "c2pa",
+    "signature",
+    "diagnostics"
+  ],
+  "properties": {
+    "contractVersion": {"const": "1.0"},
+    "result": {
+      "enum": ["PASS", "FAIL_WRITE", "FAIL_C2PA", "FAIL_TRUSTMARK", "FAIL_SOFT_BINDING", "FAIL_SIGNATURE"]
+    },
+    "reasonCode": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "INTERNAL_ERROR",
+        "FILE_NOT_FOUND",
+        "PNG_INVALID",
+        "PNG_DIMENSIONS_MISMATCH",
+        "JPEG_INVALID",
+        "JPEG_DIMENSIONS_MISMATCH",
+        "C2PA_CLAIM_MISSING",
+        "C2PA_MANIFEST_UNREADABLE",
+        "C2PA_CLAIM_REFERENCE_MISMATCH",
+        "C2PA_ASSERTION_DIGEST_MISMATCH",
+        "C2PA_ASSET_DATA_HASH_MISMATCH",
+        "C2PA_VALIDATION_FAILED",
+        "C2PA_RIGHTS_ASSERTION_MISSING",
+        "C2PA_RIGHTS_VALUE_MISMATCH",
+        "TRUSTMARK_NOT_DETECTED",
+        "TRUSTMARK_SCHEMA_MISMATCH",
+        "TRUSTMARK_PAYLOAD_LENGTH_MISMATCH",
+        "TRUSTMARK_PAYLOAD_MISMATCH",
+        "SOFT_BINDING_MISSING",
+        "SOFT_BINDING_ALGORITHM_MISMATCH",
+        "SOFT_BINDING_VALUE_MISMATCH",
+        "SIGNATURE_MISSING",
+        "SIGNATURE_INVALID",
+        "SIGNATURE_VERIFIER_UNAVAILABLE",
+        "SIGNATURE_VERIFICATION_ERROR",
+        "C2PATOOL_MISSING",
+        "C2PATOOL_INTEGRITY_FAILED"
+      ]
+    },
+    "message": {"type": "string"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "format", "dimensions"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": ["string", "null"], "pattern": "^[A-F0-9]{64}$"},
+        "format": {"type": ["string", "null"], "enum": ["png", "jpeg", null]},
+        "dimensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "height"],
+          "properties": {
+            "width": {"type": ["integer", "null"], "minimum": 1},
+            "height": {"type": ["integer", "null"], "minimum": 1}
+          }
+        }
+      }
+    },
+    "rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preset", "verified"],
+      "properties": {
+        "preset": {"const": "AI利用拒否"},
+        "verified": {"type": "boolean"}
+      }
+    },
+    "trustmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "schema", "payloadLength", "payloadMatch"],
+      "properties": {
+        "present": {"type": ["boolean", "null"]},
+        "schema": {"type": ["integer", "null"]},
+        "payloadLength": {"type": ["integer", "null"], "minimum": 0},
+        "payloadMatch": {"type": ["boolean", "null"]}
+      }
+    },
+    "softBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "algorithm", "match"],
+      "properties": {
+        "present": {"type": ["boolean", "null"]},
+        "algorithm": {"type": ["string", "null"]},
+        "match": {"type": ["boolean", "null"]}
+      }
+    },
+    "c2pa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimPresent", "assertionDigestsMatch"],
+      "properties": {
+        "claimPresent": {"type": "boolean"},
+        "assertionDigestsMatch": {"type": ["boolean", "null"]}
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "valid", "trustValidated"],
+      "properties": {
+        "present": {"type": ["boolean", "null"]},
+        "valid": {"type": ["boolean", "null"]},
+        "trustValidated": {"const": false}
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "status"],
+        "properties": {
+          "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+          "status": {"enum": ["pass", "fail", "info"]}
+        }
+      }
+    }
+  }
+}

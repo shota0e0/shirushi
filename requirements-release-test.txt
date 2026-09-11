@@ -1,0 +1,3 @@
+# Public tests use unittest from the Python standard library.
+# Install requirements-release-runtime.txt and requirements-release-build.txt;
+# no additional third-party test dependency is required for v0.1 Preview.

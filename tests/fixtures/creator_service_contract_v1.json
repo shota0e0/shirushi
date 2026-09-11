@@ -1,0 +1,15 @@
+{
+  "serviceContractVersion": "1.0",
+  "inputFixture": "testdata/e2e/clean_fixture.png",
+  "fixtures": [
+    {"id": "success", "runner": "production-cli", "expectedStatus": "SUCCESS", "expectedErrorCode": null, "expectedExitCode": 0, "outputExpected": "created", "verificationExpected": "PASS"},
+    {"id": "existing-output", "runner": "production-cli", "setup": "existing-output", "expectedStatus": "INVALID_REQUEST", "expectedErrorCode": "OUTPUT_ALREADY_EXISTS", "expectedExitCode": 2, "outputExpected": "existing-unchanged", "verificationExpected": null},
+    {"id": "missing-input", "runner": "production-cli", "setup": "missing-input", "expectedStatus": "INVALID_REQUEST", "expectedErrorCode": "INVALID_INPUT", "expectedExitCode": 2, "outputExpected": "absent", "verificationExpected": null},
+    {"id": "output-equals-input", "runner": "production-cli", "setup": "output-equals-input", "expectedStatus": "INVALID_REQUEST", "expectedErrorCode": "OUTPUT_EQUALS_INPUT", "expectedExitCode": 2, "outputExpected": "input-unchanged", "verificationExpected": null},
+    {"id": "verification-failure", "runner": "test-process-seam", "scenario": "verification-failure", "expectedStatus": "VERIFICATION_FAILED", "expectedErrorCode": "POST_WRITE_VERIFICATION_FAILED", "expectedExitCode": 1, "outputExpected": "absent", "verificationExpected": "FAIL_SIGNATURE"},
+    {"id": "cancel", "runner": "test-process-seam", "scenario": "cancel", "expectedStatus": "CANCELLED", "expectedErrorCode": "CANCELLED_BY_REQUEST", "expectedExitCode": 4, "outputExpected": "absent", "verificationExpected": "PASS"},
+    {"id": "internal-error", "runner": "test-process-seam", "scenario": "internal-error", "expectedStatus": "INTERNAL_ERROR", "expectedErrorCode": "INTERNAL_ERROR", "expectedExitCode": 3, "outputExpected": "absent", "verificationExpected": null}
+  ],
+  "determinismFixtures": ["existing-output", "missing-input", "verification-failure"],
+  "determinismRuns": 3
+}

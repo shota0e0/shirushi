@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rights-signal-lab.local/schema/creator-service-contract-v1.json",
+  "title": "rights-signal-lab CreatorService response contract v1.0",
+  "$defs": {
+    "creatorRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputPath", "outputPath"],
+      "properties": {
+        "inputPath": {"type": "string", "minLength": 1},
+        "outputPath": {"type": "string", "minLength": 1}
+      }
+    },
+    "sha256": {"type": "string", "pattern": "^[A-F0-9]{64}$"},
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "INVALID_INPUT",
+        "OUTPUT_ALREADY_EXISTS",
+        "OUTPUT_EQUALS_INPUT",
+        "OUTPUT_NOT_PNG",
+        "OUTPUT_PREPARATION_FAILED",
+        "GENERATION_FAILED",
+        "ATOMIC_COMMIT_FAILED",
+        "POST_WRITE_VERIFICATION_FAILED",
+        "VERIFIER_CONTRACT_MISMATCH",
+        "INPUT_CHANGED",
+        "TEMP_CLEANUP_FAILED",
+        "INTERNAL_ERROR",
+        "CANCELLED_BY_REQUEST",
+        "MODEL_NETWORK_UNAVAILABLE",
+        "MODEL_CACHE_NOT_WRITABLE",
+        "MODEL_STORAGE_FULL",
+        "MODEL_INTEGRITY_FAILED",
+        "MODEL_LOAD_FAILED",
+        "MODEL_PREPARATION_FAILED",
+        "C2PATOOL_MISSING",
+        "C2PATOOL_INTEGRITY_FAILED"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"$ref": "#/$defs/errorCode"},
+        "message": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "serviceContractVersion",
+    "status",
+    "errorCode",
+    "message",
+    "input",
+    "output",
+    "verification",
+    "error",
+    "outputPath",
+    "inputSha256",
+    "outputSha256"
+  ],
+  "properties": {
+    "serviceContractVersion": {"const": "1.0"},
+    "status": {
+      "enum": ["SUCCESS", "CANCELLED", "INVALID_REQUEST", "WRITE_FAILED", "VERIFICATION_FAILED", "INTERNAL_ERROR"]
+    },
+    "errorCode": {
+      "anyOf": [{"type": "null"}, {"$ref": "#/$defs/errorCode"}]
+    },
+    "message": {"type": "string", "minLength": 1},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}
+      }
+    },
+    "output": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      ]
+    },
+    "verification": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "verifier_contract_v1.schema.json"}
+      ]
+    },
+    "error": {
+      "anyOf": [{"type": "null"}, {"$ref": "#/$defs/error"}]
+    },
+    "outputPath": {"type": "string", "minLength": 1},
+    "inputSha256": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "outputSha256": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "SUCCESS"}}},
+      "then": {
+        "properties": {
+          "errorCode": {"type": "null"},
+          "error": {"type": "null"},
+          "output": {"type": "object"},
+          "outputSha256": {"$ref": "#/$defs/sha256"},
+          "verification": {
+            "allOf": [
+              {"$ref": "verifier_contract_v1.schema.json"},
+              {"properties": {"contractVersion": {"const": "1.0"}, "result": {"const": "PASS"}}}
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "errorCode": {"$ref": "#/$defs/errorCode"},
+          "error": {"$ref": "#/$defs/error"},
+          "output": {"type": "null"},
+          "outputSha256": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "CANCELLED"}}},
+      "then": {"properties": {"errorCode": {"const": "CANCELLED_BY_REQUEST"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "INVALID_REQUEST"}}},
+      "then": {
+        "properties": {
+          "errorCode": {"enum": ["INVALID_INPUT", "OUTPUT_ALREADY_EXISTS", "OUTPUT_EQUALS_INPUT", "OUTPUT_NOT_PNG"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "WRITE_FAILED"}}},
+      "then": {
+        "properties": {
+          "errorCode": {"enum": ["OUTPUT_PREPARATION_FAILED", "GENERATION_FAILED", "ATOMIC_COMMIT_FAILED", "MODEL_NETWORK_UNAVAILABLE", "MODEL_CACHE_NOT_WRITABLE", "MODEL_STORAGE_FULL", "MODEL_INTEGRITY_FAILED", "MODEL_LOAD_FAILED", "MODEL_PREPARATION_FAILED"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "VERIFICATION_FAILED"}}},
+      "then": {
+        "properties": {
+          "errorCode": {"enum": ["GENERATION_FAILED", "POST_WRITE_VERIFICATION_FAILED", "C2PATOOL_MISSING", "C2PATOOL_INTEGRITY_FAILED"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "INTERNAL_ERROR"}}},
+      "then": {
+        "properties": {
+          "errorCode": {"enum": ["VERIFIER_CONTRACT_MISMATCH", "INPUT_CHANGED", "TEMP_CLEANUP_FAILED", "INTERNAL_ERROR"]}
+        }
+      }
+    }
+  ]
+}

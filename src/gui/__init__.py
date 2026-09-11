@@ -1,0 +1,1 @@
+"""Minimal Creator GUI package."""

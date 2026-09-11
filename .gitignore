@@ -1,0 +1,83 @@
+# Python environments and caches
+.venv/
+.venv-*/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build and package outputs
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secret material
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*_private.pem
+*private_key*.pem
+credentials.json
+credentials.*.json
+*.credential
+*.credentials
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+tmp/
+temp/
+.tmp/
+.temp/
+
+# Generated application, benchmark, and local input data
+output/
+benchmark/
+input/
+
+# Local release review and audit artifacts created outside output/ by mistake
+**/payload_inventory.json
+**/payload_inventory.csv
+**/zip_verification.json
+**/final_payload_scan.json
+**/runtime_smoke.png
+**/smoke_screenshot*.png
+
+# Downloaded tools, model weights, and model caches
+tools/**/c2patool.exe
+!tools/c2patool-0.26.60/c2patool/c2patool.exe
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+**/.cache/
+**/model_cache/
+**/models--*/
+
+# Archives and checksum sidecars produced by worker exchanges
+*.zip
+*.zip.sha256
+
+# OS and editor state
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
