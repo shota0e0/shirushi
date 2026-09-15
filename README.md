@@ -16,6 +16,14 @@ Windows 64bit版のShirushi v0.1 Preview.1は、次のZIPファイルからダ�
 2. ZIPファイルを展開します。
 3. 展開したフォルダー内の`Shirushi.exe`を起動します。
 
+### Windowsの警告が表示された場合
+
+v0.1 Previewでは、Windows向けの正式なコード署名を行っていません。そのため、初回起動時にWindowsの警告が表示される場合があります。
+
+警告画面で「詳細情報」を選択し、続いて「実行」を選択してください。Windowsのバージョンや設定によって、表示が異なる場合があります。
+
+![Windowsの警告からShirushiを起動する手順](https://raw.githubusercontent.com/shota0e0/shirushi/main/docs/images/windows-smartscreen-guide.png)
+
 GitHubの「Code」から選べる「Download ZIP」はソースコードです。アプリを使う場合は、上記のRelease版ZIPをダウンロードしてください。
 
 ## Release版を起動する
