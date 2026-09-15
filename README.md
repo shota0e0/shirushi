@@ -8,9 +8,9 @@ C2PA、CAWG Rights、TrustMarkを利用しています。これらの仕様を�
 
 ## ダウンロード
 
-Windows 64bit版のShirushi v0.1 Previewは、次のZIPファイルからダウンロードできます。
+Windows 64bit版のShirushi v0.1 Preview.1は、次のZIPファイルからダウンロードできます。
 
-[Shirushi v0.1 Previewをダウンロード](https://github.com/shota0e0/shirushi/releases/download/v0.1.0-preview/shirushi-v0.1-preview-windows-x64.zip)
+[Shirushi v0.1 Preview.1をダウンロード](https://github.com/shota0e0/shirushi/releases/download/v0.1.0-preview.1/shirushi-v0.1-preview.1-windows-x64.zip)
 
 1. ZIPファイルをダウンロードします。
 2. ZIPファイルを展開します。
@@ -22,7 +22,7 @@ GitHubの「Code」から選べる「Download ZIP」はソースコードです�
 
 Shirushi v0.1 Previewの配布パッケージは、Windows x64向けのZIP形式です。インストーラーは使用しません。
 
-1. `shirushi-v0.1-preview-windows-x64.zip`を入手します。
+1. `shirushi-v0.1-preview.1-windows-x64.zip`を入手します（旧版の`shirushi-v0.1-preview-windows-x64.zip`と取り違えないでください）。
 2. ZIPファイルを右クリックして`すべて展開`を選び、任意の場所へ展開します。
 3. 展開したフォルダー内の`Shirushi.exe`をダブルクリックします。
 
