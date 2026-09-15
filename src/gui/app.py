@@ -355,7 +355,7 @@ class CreatorWindow:
             INITIAL_WINDOW_SIZE[1],
             self.content.winfo_reqheight() + self.footer.winfo_reqheight() + 90,
         )
-        maximum = max(720, self.root.winfo_screenheight() - 80)
+        maximum = max(720, self.root.winfo_screenheight() - 72)
         self.root.geometry(f"{INITIAL_WINDOW_SIZE[0]}x{min(desired, maximum)}")
 
     def _set_processing(self, processing: bool) -> None:
@@ -550,10 +550,10 @@ class CreatorWindow:
         detail_frame = ttk.Frame(detail_content, style="ResultBody.TFrame")
         ttk.Label(detail_frame, text="技術情報", style="TechnicalHeading.TLabel").pack(anchor="w")
         technical_rows = ttk.Frame(detail_frame, style="App.TFrame")
-        technical_rows.pack(fill="x", pady=(8, 6))
+        technical_rows.pack(fill="x", pady=(4, 8))
         for label, value in inspection_technical_rows(result):
             row = ttk.Frame(technical_rows, style="App.TFrame")
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x")
             ttk.Label(row, text=label, style="Muted.TLabel", width=20).pack(side="left", anchor="w")
             ttk.Label(row, text=value, style="Body.TLabel").pack(side="left", anchor="w")
         signature_note = signature_explanation(result)
@@ -564,7 +564,7 @@ class CreatorWindow:
                 style="ResultMuted.TLabel",
                 wraplength=480,
                 justify="left",
-            ).pack(anchor="w", pady=(4, 4))
+            ).pack(anchor="w")
         if result.warnings:
             ttk.Label(
                 detail_frame,
@@ -578,9 +578,13 @@ class CreatorWindow:
             if detail_frame.winfo_manager():
                 detail_frame.pack_forget()
                 rows.pack(fill="x")
+                frame.configure(padding=(14, 10))
+                result_body.pack_configure(pady=(8, 0))
                 detail_button.configure(text="詳細を見る")
             else:
                 rows.pack_forget()
+                frame.configure(padding=(14, 3, 14, 6))
+                result_body.pack_configure(pady=(4, 0))
                 detail_frame.pack(fill="x")
                 detail_button.configure(text="詳細を閉じる")
             self._fit_window_to_content()
