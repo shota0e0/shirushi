@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import struct
+import tomllib
 import unittest
 from unittest import mock
 import uuid
@@ -150,6 +151,9 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         return destination
 
     def test_positive_exact_package_and_manifest(self):
+        actual_manifest = tomllib.loads((PROJECT / "desktop/Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual("MIT", actual_manifest["package"].get("license"))
+        self.assertEqual(("LICENSE", "project-license"), PACKAGE.SOURCE_COPIES["LICENSE"])
         output = self.create()
         report = PACKAGE.audit_package(output)
         self.assertEqual("PASS", report["audit"])
@@ -163,6 +167,10 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             for name in dependency_names))
         self.assertNotIn("manifest.json", names)
         self.assertNotIn("SHA256SUMS", names)
+        license_entry = next(entry for entry in manifest["files"] if entry["path"] == "LICENSE")
+        self.assertEqual("project-license", license_entry["classification"])
+        self.assertEqual("LICENSE", license_entry["source"]["identifier"])
+        self.assertEqual((self.source / "LICENSE").read_bytes(), (output / "LICENSE").read_bytes())
         sums = (output / "SHA256SUMS").read_text(encoding="ascii")
         self.assertIn("  manifest.json\n", sums)
         self.assertNotIn("  SHA256SUMS\n", sums)
@@ -326,6 +334,15 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     def test_unknown_license_and_missing_license_text_fail_closed(self):
         metadata = json.loads(self.metadata.read_text(encoding="utf-8"))
+        metadata["packages"][0]["license"] = None
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no declared license: shirushi-desktop 0.2.0"):
+            self.create("missing-root-license")
+        metadata["packages"][0]["license"] = "unknown"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unknown license: shirushi-desktop 0.2.0"):
+            self.create("unknown-root-license")
+        metadata["packages"][0]["license"] = "MIT"
         metadata["packages"][1]["license"] = None
         self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "no declared license"):
