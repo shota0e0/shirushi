@@ -29,6 +29,7 @@ NATIVE_FILES = (
     "desktop/tauri.conf.json", "desktop/capabilities/main-window.json",
     "desktop/src/host.rs", "desktop/src/lib.rs", "desktop/src/main.rs",
     "desktop/src/protocol.rs", "desktop/src/asset_stage.rs",
+    "desktop/src/bin/shirushi-canary-runner.rs",
     "desktop/tests/fixtures/bridge_fixture.py",
 )
 PAIR = re.compile(r'\(\s*"([^"\n]+)"\s*,\s*"([^"\n]+)"\s*\)\s*,?')

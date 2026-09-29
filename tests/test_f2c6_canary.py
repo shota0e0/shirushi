@@ -126,6 +126,8 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self.rust_notice.write_text("Synthetic Rust standard library notice\n", encoding="utf-8")
         self.executable = self.case / "shirushi-desktop.exe"
         self.executable.write_bytes(synthetic_pe())
+        self.runner_executable = self.case / "shirushi-canary-runner.exe"
+        self.runner_executable.write_bytes(synthetic_pe(extra=b"DEVELOPMENT CANARY TOOL"))
 
     @staticmethod
     def source_audit(_root: Path):
@@ -139,6 +141,7 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             output,
             self.metadata,
             self.rust_notice,
+            self.runner_executable,
             repository="example/shirushi",
             event_name="pull_request",
             tested_sha=SHA,
@@ -320,6 +323,13 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         names = {entry["path"] for entry in manifest["files"]}
         self.assertEqual(manifest["fileCount"], len(names))
         self.assertTrue(PACKAGE.CORE_FILES | PACKAGE.GENERATED_FILES <= names)
+        self.assertEqual({"shirushi-desktop.exe", "shirushi-canary-runner.exe"},
+                         {name for name in names if name.endswith(".exe")})
+        runner_entry = next(entry for entry in manifest["files"]
+                            if entry["path"] == "shirushi-canary-runner.exe")
+        self.assertEqual("development-canary-runner", runner_entry["classification"])
+        self.assertEqual(hashlib.sha256(self.runner_executable.read_bytes()).hexdigest(),
+                         runner_entry["sha256"])
         dependency_names = names - PACKAGE.CORE_FILES - PACKAGE.GENERATED_FILES
         self.assertTrue(dependency_names)
         self.assertTrue(all(PACKAGE.DEPENDENCY_TEXT.fullmatch(name)
@@ -482,6 +492,16 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         with self.assertRaisesRegex(ValueError, "set mismatch|executable"):
             PACKAGE.audit_package(executable)
 
+        missing_runner = self.copy_package(original, "missing-runner")
+        (missing_runner / "shirushi-canary-runner.exe").unlink()
+        with self.assertRaisesRegex(ValueError, "set mismatch|missing"):
+            PACKAGE.audit_package(missing_runner)
+
+        tampered_runner = self.copy_package(original, "tampered-runner")
+        (tampered_runner / "shirushi-canary-runner.exe").write_bytes(synthetic_pe(extra=b"tampered"))
+        with self.assertRaisesRegex(ValueError, "hash mismatch|size mismatch"):
+            PACKAGE.audit_package(tampered_runner)
+
     def test_path_traversal_case_collision_and_cache_names_fail(self):
         for names, reason in (
             (["../escape"], "unsafe"),
@@ -558,7 +578,7 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             with self.assertRaisesRegex(ValueError, "invalid source root"):
                 PACKAGE.create_package(
                     self.source, self.executable, self.case / "linked-source",
-                    self.metadata, self.rust_notice,
+                    self.metadata, self.rust_notice, self.runner_executable,
                     repository="example/shirushi", event_name="pull_request",
                     tested_sha=SHA, head_sha=SHA, base_sha=SHA,
                     source_audit=self.source_audit,
@@ -578,6 +598,7 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 with self.assertRaisesRegex(ValueError, "secret-like|personal/source"):
                     PACKAGE.create_package(
                         self.source, self.executable, output, self.metadata, self.rust_notice,
+                        self.runner_executable,
                         repository="example/shirushi", event_name="workflow_dispatch",
                         tested_sha=SHA, head_sha=SHA, base_sha=None,
                         source_audit=self.source_audit,
@@ -601,6 +622,7 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         with self.assertRaisesRegex(ValueError, "already exists"):
             PACKAGE.create_package(
                 self.source, self.executable, existing, self.metadata, self.rust_notice,
+                self.runner_executable,
                 repository="example/shirushi", event_name="pull_request",
                 tested_sha=SHA, head_sha=SHA, base_sha=SHA,
                 source_audit=self.source_audit,
@@ -609,6 +631,7 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         with self.assertRaisesRegex(ValueError, "outside source"):
             PACKAGE.create_package(
                 self.source, self.executable, inside, self.metadata, self.rust_notice,
+                self.runner_executable,
                 repository="example/shirushi", event_name="pull_request",
                 tested_sha=SHA, head_sha=SHA, base_sha=SHA,
                 source_audit=self.source_audit,

@@ -194,6 +194,14 @@ jobs:
           cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Test native DEVELOPMENT CANARY runner offline
+        id: canary_runner_tests
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo test --locked --offline --features manual-canary --bin shirushi-canary-runner --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build debug-only manual canary executable offline without launching
         id: canary_cargo_build
         shell: pwsh
@@ -204,6 +212,17 @@ jobs:
           $item = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-desktop.exe") -ErrorAction Stop
           if ($item.PSIsContainer -or $item.Length -le 0) { throw "Manual canary executable is missing or invalid" }
           "Verified feature executable without launching: $($item.FullName) ($($item.Length) bytes)"
+
+      - name: Build native DEVELOPMENT CANARY runner offline
+        id: canary_runner_build
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo build --locked --offline --features manual-canary --bin shirushi-canary-runner --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $item = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-canary-runner.exe") -ErrorAction Stop
+          if ($item.PSIsContainer -or $item.Length -le 0) { throw "Native runner executable is missing or invalid" }
+          "Verified DEVELOPMENT CANARY runner without launching: $($item.FullName) ($($item.Length) bytes)"
 
       - name: Re-audit generated assets after manual canary build
         id: canary_post_audit
@@ -234,6 +253,7 @@ jobs:
             "scripts\package_f2c6_canary.py", "create",
             "--source-root", $PWD.Path,
             "--executable", (Join-Path $targetDir "debug\shirushi-desktop.exe"),
+            "--runner-executable", (Join-Path $targetDir "debug\shirushi-canary-runner.exe"),
             "--output", $artifactDir,
             "--cargo-metadata", $metadataPath,
             "--rust-library-notice", $rustLibraryNotice,
@@ -248,14 +268,24 @@ jobs:
           "artifact_dir=$artifactDir" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $manifestHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "manifest.json") -Algorithm SHA256).Hash.ToLowerInvariant()
           $exeHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "shirushi-desktop.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runnerHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "shirushi-canary-runner.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
           "DEVELOPMENT CANARY manifest SHA-256: $manifestHash"
           "DEVELOPMENT CANARY executable SHA-256: $exeHash"
+          "DEVELOPMENT CANARY runner SHA-256: $runnerHash"
 
       - name: Independently re-audit DEVELOPMENT CANARY package
         id: audit_canary
         shell: pwsh
         run: |
           .\.venv-py312\Scripts\python.exe scripts\package_f2c6_canary.py audit --package-dir "${{ steps.package_canary.outputs.artifact_dir }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compare PowerShell reference and native runner Prepare boundaries
+        id: canary_equivalence
+        shell: pwsh
+        run: |
+          $python = (Get-Command python -ErrorAction Stop).Source
+          pwsh -NoProfile -File tests\test_f2c7_equivalence.ps1 -PackageDir "${{ steps.package_canary.outputs.artifact_dir }}" -PythonPath $python
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload DEVELOPMENT CANARY package
@@ -309,10 +339,13 @@ jobs:
             "| Post-build staged-asset audit | ${{ steps.post_audit.outcome }} |",
             "| Debug executable existence only | ${{ steps.exe_exists.outcome }} |",
             "| Manual-canary feature test (isolated target) | ${{ steps.canary_cargo_test.outcome }} |",
+            "| Native runner tests | ${{ steps.canary_runner_tests.outcome }} |",
             "| Manual-canary feature build (isolated target) | ${{ steps.canary_cargo_build.outcome }} |",
+            "| Native runner build | ${{ steps.canary_runner_build.outcome }} |",
             "| Manual-canary staged-asset re-audit | ${{ steps.canary_post_audit.outcome }} |",
             "| DEVELOPMENT CANARY package creation | ${{ steps.package_canary.outcome }} |",
             "| DEVELOPMENT CANARY independent package audit | ${{ steps.audit_canary.outcome }} |",
+            "| PowerShell/native Prepare equivalence | ${{ steps.canary_equivalence.outcome }} |",
             "| DEVELOPMENT CANARY artifact upload | ${{ steps.upload_canary.outcome }} |",
             "",
             "DEVELOPMENT CANARY artifact ID: ${{ steps.upload_canary.outputs.artifact-id }}",

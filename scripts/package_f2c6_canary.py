@@ -59,7 +59,10 @@ SOURCE_COPIES = {
     ),
 }
 RUST_LIBRARY_NOTICE = "notices/rust-1.97.1-COPYRIGHT-library.html"
-CORE_FILES = {"shirushi-desktop.exe", RUST_LIBRARY_NOTICE, *SOURCE_COPIES}
+CORE_FILES = {
+    "shirushi-desktop.exe", "shirushi-canary-runner.exe",
+    RUST_LIBRARY_NOTICE, *SOURCE_COPIES,
+}
 GENERATED_FILES = {"THIRD_PARTY_LICENSES/manifest.json"}
 CONTROL_FILES = {"manifest.json", "SHA256SUMS"}
 FORBIDDEN_PATH_PARTS = {
@@ -583,6 +586,7 @@ def create_package(
     output: Path,
     metadata_path: Path,
     rust_library_notice: Path,
+    runner_executable: Path,
     *,
     repository: str,
     event_name: str,
@@ -593,12 +597,15 @@ def create_package(
 ) -> dict[str, object]:
     require(source_root.is_dir() and not _linked(source_root), "invalid source root")
     require(executable.is_file() and not _linked(executable), "invalid executable input")
+    require(runner_executable.is_file() and not _linked(runner_executable),
+            "invalid runner executable input")
     require(metadata_path.is_file() and not _linked(metadata_path), "invalid cargo metadata input")
     require(rust_library_notice.is_file() and not _linked(rust_library_notice),
             "invalid Rust library notice input")
     require(output.parent.is_dir() and not _linked(output.parent), "invalid output parent")
     source_root = source_root.resolve(strict=True)
     executable = executable.resolve(strict=True)
+    runner_executable = runner_executable.resolve(strict=True)
     metadata_path = metadata_path.resolve(strict=True)
     rust_library_notice = rust_library_notice.resolve(strict=True)
     output = output.resolve(strict=False)
@@ -614,11 +621,18 @@ def create_package(
     executable_data = executable.read_bytes()
     _verify_pe_amd64(executable_data)
     _scan_secrets("shirushi-desktop.exe", executable_data, executable=True)
+    runner_data = runner_executable.read_bytes()
+    _verify_pe_amd64(runner_data)
+    _scan_secrets("shirushi-canary-runner.exe", runner_data, executable=True)
     dependency_manifest, dependency_texts = collect_dependency_licenses(source_root, metadata_path)
     payloads: dict[str, tuple[bytes, str, str, str]] = {
         "shirushi-desktop.exe": (
             executable_data, "debug-canary-executable", "hosted-cargo-build",
             "desktop/Cargo.toml#manual-canary",
+        ),
+        "shirushi-canary-runner.exe": (
+            runner_data, "development-canary-runner", "hosted-cargo-build",
+            "desktop/Cargo.toml#manual-canary-runner",
         ),
         "THIRD_PARTY_LICENSES/manifest.json": (
             dependency_manifest, "dependency-license-inventory", "generated",
@@ -638,7 +652,9 @@ def create_package(
     _unique_names(set(payloads) | CONTROL_FILES)
     _verify_niki(payloads["demo-profile/Shirushi/personal-mark/personal-mark-v2.json"][0])
     for name, (data, classification, _, _) in payloads.items():
-        _scan_secrets(name, data, executable=name == "shirushi-desktop.exe")
+        _scan_secrets(name, data, executable=name in {
+            "shirushi-desktop.exe", "shirushi-canary-runner.exe",
+        })
         require(classification != "", f"missing classification: {name}")
     output.mkdir(parents=False)
     entries = []
@@ -804,10 +820,14 @@ def audit_package(package_dir: Path) -> dict[str, object]:
                 and isinstance(source["sha256"], str) and HEX_SHA256.fullmatch(source["sha256"])
                 and source["sha256"] == entry["sha256"],
                 f"bad source provenance: {name}")
-        _scan_secrets(name, data, executable=name == "shirushi-desktop.exe")
+        _scan_secrets(name, data, executable=name in {
+            "shirushi-desktop.exe", "shirushi-canary-runner.exe",
+        })
     exe_files = [name for name in actual_paths if name.casefold().endswith(".exe")]
-    require(exe_files == ["shirushi-desktop.exe"], "unexpected executable set")
+    require(set(exe_files) == {"shirushi-desktop.exe", "shirushi-canary-runner.exe"}
+            and len(exe_files) == 2, "unexpected executable set")
     _verify_pe_amd64(regular_file(package_dir, "shirushi-desktop.exe").read_bytes())
+    _verify_pe_amd64(regular_file(package_dir, "shirushi-canary-runner.exe").read_bytes())
     _verify_niki(regular_file(
         package_dir, "demo-profile/Shirushi/personal-mark/personal-mark-v2.json"
     ).read_bytes())
@@ -871,6 +891,7 @@ def main() -> int:
     create = subparsers.add_parser("create")
     create.add_argument("--source-root", type=Path, required=True)
     create.add_argument("--executable", type=Path, required=True)
+    create.add_argument("--runner-executable", type=Path, required=True)
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--cargo-metadata", type=Path, required=True)
     create.add_argument("--rust-library-notice", type=Path, required=True)
@@ -889,7 +910,7 @@ def main() -> int:
         if args.command == "create":
             result = create_package(
                 args.source_root, args.executable, args.output, args.cargo_metadata,
-                args.rust_library_notice,
+                args.rust_library_notice, args.runner_executable,
                 repository=args.repository, event_name=args.event_name,
                 tested_sha=args.tested_sha, head_sha=args.head_sha, base_sha=args.base_sha,
             )
