@@ -1,5 +1,15 @@
 # F2C verification and clean public export
 
+## Current status: 2026-09-29 closeout
+
+**F2C Tauri/Python bridge foundation: PASS. G2: OWNER APPROVED.**
+See the [current closeout record](f2c-closeout.md) for separately attributed
+Owner manual evidence, CI/artifact provenance, unresolved observations, and
+the foundation-only merge boundary. The earlier pending/not-approved statements
+below describe their historical gates; this dated record supersedes them.
+Historical F2C.4/F2C.5 ledgers are retained unchanged. Owner merge is a separate
+decision; this is not v0.2 release readiness.
+
 ## F2C.6 development-canary boundary
 
 The materialization ledger below records the historical F2C.4 review, not the
