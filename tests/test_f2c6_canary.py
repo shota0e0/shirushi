@@ -182,6 +182,11 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ).read_text(encoding="utf-8")))
 
     def test_license_preflight_normal_pass_and_workflow_order(self):
+        metadata_document = json.loads(self.metadata.read_text(encoding="utf-8"))
+        metadata_document["packages"][1]["license"] = (
+            "(MIT OR Apache-2.0) AND Unicode-3.0"
+        )
+        self.metadata.write_text(json.dumps(metadata_document), encoding="utf-8")
         report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
         self.assertEqual({
             "schemaVersion", "diagnostic", "audit", "reason", "target",
@@ -268,6 +273,11 @@ checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         metadata["packages"][1]["license"] = None
         self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "no declared license: fake-dependency 1.0.0"):
+            PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+
+        metadata["packages"][1]["license"] = "(MIT OR Apache-2.0)\nPRIVATE"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "malformed license expression"):
             PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
 
         self.metadata.write_text('{"packages": "not-a-list"}', encoding="utf-8")

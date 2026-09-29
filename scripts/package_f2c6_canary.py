@@ -25,7 +25,7 @@ HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 PACKAGE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,127}\Z")
-LICENSE_EXPRESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+()/:-]{0,255}\Z")
+LICENSE_EXPRESSION = re.compile(r"[A-Za-z0-9(][A-Za-z0-9 .+()/:-]{0,255}\Z")
 DEPENDENCY_TEXT = re.compile(r"THIRD_PARTY_LICENSES/texts/[0-9a-f]{64}\.txt\Z")
 LICENSE_NAMES = re.compile(
     r"(?:licen[cs]e|copying|copyright|notice)(?:[-_.].*)?\Z", re.IGNORECASE
