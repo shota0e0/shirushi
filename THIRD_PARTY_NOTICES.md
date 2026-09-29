@@ -89,6 +89,18 @@ PowerShell 7に依存する署名検証を次のPythonパッケージへ置き�
 
 ## ソースコードのライセンス表示
 
+### Personal Mark v2 の Unicode 16.0 データ
+
+F2BのNFC・文字属性判定ではUnicode ConsortiumのUCD 16.0.0から機械生成した固定テーブルを使用します。ホストPython/JavaScriptのUnicodeバージョンには依存しません。テーブル・公式normalization testの派生fixtureはUnicode License v3（Unicode-3.0）の対象であり、ShirushiのMIT Licenseへ変更しません。
+
+- Pythonデータ: `src/data/personal_mark_unicode16.json`、ライセンス本文: `src/data/Unicode-LICENSE.txt`。
+- Webデータ: `web/personal-mark-v2/unicode16-data.js`、ライセンス本文: 同directoryの`Unicode-LICENSE.txt`。
+- 派生テストfixture: `tests/fixtures/personal_mark_unicode16_normalization.json`、ライセンス本文: `tests/fixtures/Unicode-LICENSE.txt`。
+- 生成手順: `scripts/generate_personal_mark_unicode16.py`。公式取得元URLとSHA-256を固定テーブルおよび生成scriptに記録します。アプリ実行・通常テストではネットワーク取得しません。
+- 取得元: <https://www.unicode.org/Public/16.0.0/ucd/>、ライセンス: <https://www.unicode.org/license.txt>。
+
+これはリポジトリ内F2Bデータの表示です。配布パッケージへの組込み・release検証を実施済みとはしません。
+
 リポジトリでは、トップレベルの`LICENSE`をShirushi独自ソースのライセンス表示として使用します。現行の運用では、すべてのソースファイルへ個別のヘッダーを追加する必要はないとしています。SPDXヘッダーは、今後の配布または開発参加の方式で必要になった場合に検討します。
 
 ## 配布パッケージの確認項目
