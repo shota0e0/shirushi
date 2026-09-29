@@ -635,6 +635,57 @@ mod runner {
             win32_error_name(error),
         )
     }
+    struct OrphanCandidate {
+        entry: ProcessEntry,
+        created: u64,
+        provenance: &'static str,
+    }
+    fn orphan_liveness(candidate: &OrphanCandidate) -> (Liveness, Option<u32>, &'static str) {
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, candidate.entry.pid) };
+        if raw.is_null() {
+            return (Liveness::Unknown, None, "unavailable");
+        }
+        let _handle = Handle(raw);
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        if unsafe { GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return (Liveness::Unknown, None, "unavailable");
+        }
+        if ticks(created) != candidate.created {
+            return (Liveness::Unknown, None, "changed");
+        }
+        let (liveness, exit_code) = probe_liveness(candidate.entry.pid, raw);
+        (liveness, exit_code, "same")
+    }
+    fn orphan_diagnostic(
+        candidate: &OrphanCandidate,
+        liveness: Liveness,
+        exit_code: Option<u32>,
+        identity_match: &'static str,
+    ) -> String {
+        let alive = match liveness {
+            Liveness::Alive => "yes",
+            Liveness::Exited => "no",
+            Liveness::Unknown => "unknown",
+        };
+        let exit = if liveness == Liveness::Exited {
+            exit_code.map_or_else(|| "unknown".into(), |code| code.to_string())
+        } else {
+            "not_applicable".into()
+        };
+        format!(
+            "pid={} snapshot_name={} parent_pid={} provenance={} identity_match={} alive={} exit_code={}",
+            candidate.entry.pid,
+            safe_snapshot_name(&candidate.entry.name),
+            candidate.entry.parent,
+            candidate.provenance,
+            identity_match,
+            alive,
+            exit,
+        )
+    }
     fn identity(
         entry: &ProcessEntry,
         expected_python: &Path,
@@ -805,6 +856,7 @@ mod runner {
             .collect();
         let mut remaining = 0_usize;
         let mut remaining_python = 0_usize;
+        let mut orphan_candidates = Vec::new();
         for row in &current {
             let known = seen.get(&row.pid);
             let possible_late = row.parent == root_pid || known_ids.contains(&row.parent);
@@ -828,6 +880,17 @@ mod runner {
                 if record.python {
                     remaining_python += 1;
                 }
+                orphan_candidates.push(OrphanCandidate {
+                    entry: row.clone(),
+                    created: record.created,
+                    provenance: if same_known {
+                        "observed_descendant"
+                    } else if late_child {
+                        "snapshot_parent"
+                    } else {
+                        "package_python"
+                    },
+                });
             }
         }
         emit(
@@ -858,6 +921,13 @@ mod runner {
             );
         }
         if remaining != 0 {
+            for candidate in &orphan_candidates {
+                let (liveness, exit_code, identity_match) = orphan_liveness(candidate);
+                emit(
+                    "ORPHAN_PROCESS_DETAIL",
+                    &orphan_diagnostic(candidate, liveness, exit_code, identity_match),
+                );
+            }
             return fail(
                 "ORPHAN_PROCESS_DETECTED",
                 "corroborated canary child remains",
@@ -1092,6 +1162,40 @@ mod runner {
             let record = identity(&row, Path::new("not-python.exe"), "test").unwrap();
             assert!(same_path(&record.path, &current));
             assert!(!record.python);
+        }
+        #[test]
+        fn orphan_detail_is_bounded_and_does_not_expose_paths() {
+            let candidate = OrphanCandidate {
+                entry: ProcessEntry {
+                    pid: 42,
+                    parent: 7,
+                    name: "Z:\\fixture\\msedgewebview2.exe\n".into(),
+                },
+                created: 123,
+                provenance: "observed_descendant",
+            };
+            let line = orphan_diagnostic(&candidate, Liveness::Exited, Some(0), "same");
+            assert!(line.contains("pid=42 snapshot_name=msedgewebview2.exe_ parent_pid=7"));
+            assert!(line.contains("provenance=observed_descendant identity_match=same"));
+            assert!(line.contains("alive=no exit_code=0"));
+            assert!(!line.contains("fixture"));
+            assert!(!line.contains('\\'));
+            assert!(!line.contains('\n'));
+        }
+        #[test]
+        fn orphan_liveness_matches_live_process_identity() {
+            let row = ProcessEntry {
+                pid: std::process::id(),
+                parent: 0,
+                name: RUNNER.into(),
+            };
+            let identity = identity(&row, Path::new("not-python.exe"), "test").unwrap();
+            let candidate = OrphanCandidate {
+                entry: row,
+                created: identity.created,
+                provenance: "observed_descendant",
+            };
+            assert_eq!(orphan_liveness(&candidate), (Liveness::Alive, None, "same"));
         }
     }
 }
