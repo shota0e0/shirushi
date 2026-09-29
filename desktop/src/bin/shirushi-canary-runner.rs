@@ -28,8 +28,10 @@ mod runner {
     use std::thread;
     use std::time::Duration;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, FILETIME, HANDLE,
-        INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND,
+        ERROR_NO_MORE_FILES, ERROR_PARTIAL_COPY, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next,
@@ -41,11 +43,13 @@ mod runner {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateMutexW, GetProcessTimes, OpenProcess, OpenThread, QueryFullProcessImageNameW,
-        ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+        CreateMutexW, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
+        QueryFullProcessImageNameW, ResumeThread, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     };
 
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 
     const DESKTOP: &str = "shirushi-desktop.exe";
     const RUNNER: &str = "shirushi-canary-runner.exe";
@@ -553,7 +557,89 @@ mod runner {
     fn ticks(value: FILETIME) -> u64 {
         (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
     }
-    fn identity(entry: &ProcessEntry, expected_python: &Path) -> Result<ProcessIdentity> {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Liveness {
+        Alive,
+        Exited,
+        Unknown,
+    }
+    fn probe_liveness(pid: u32, query_handle: HANDLE) -> (Liveness, Option<u32>) {
+        // Do not increase the rights requested by the normal image-query path.
+        // A separate, zero-time wait is diagnostic only and cannot turn failure into success.
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if raw.is_null() {
+            return (Liveness::Unknown, None);
+        }
+        let _wait_handle = Handle(raw);
+        match unsafe { WaitForSingleObject(raw, 0) } {
+            WAIT_TIMEOUT => (Liveness::Alive, None),
+            WAIT_OBJECT_0 => {
+                let mut exit_code = 0_u32;
+                let known = unsafe { GetExitCodeProcess(query_handle, &mut exit_code) } != 0;
+                (Liveness::Exited, known.then_some(exit_code))
+            }
+            _ => (Liveness::Unknown, None),
+        }
+    }
+    fn win32_error_name(code: u32) -> &'static str {
+        match code {
+            ERROR_ACCESS_DENIED => "ERROR_ACCESS_DENIED",
+            ERROR_INVALID_HANDLE => "ERROR_INVALID_HANDLE",
+            ERROR_INVALID_PARAMETER => "ERROR_INVALID_PARAMETER",
+            ERROR_INSUFFICIENT_BUFFER => "ERROR_INSUFFICIENT_BUFFER",
+            ERROR_PARTIAL_COPY => "ERROR_PARTIAL_COPY",
+            ERROR_NOT_FOUND => "ERROR_NOT_FOUND",
+            _ => "UNKNOWN_WIN32_ERROR",
+        }
+    }
+    fn safe_snapshot_name(name: &str) -> String {
+        let basename = name.rsplit(['\\', '/']).next().unwrap_or("");
+        let value: String = basename
+            .chars()
+            .take(64)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if value.is_empty() {
+            "unknown".into()
+        } else {
+            value
+        }
+    }
+    fn image_query_diagnostic(
+        phase: &'static str,
+        entry: &ProcessEntry,
+        error: u32,
+        liveness: Liveness,
+        exit_code: Option<u32>,
+    ) -> String {
+        let alive = match liveness {
+            Liveness::Alive => "yes",
+            Liveness::Exited => "no",
+            Liveness::Unknown => "unknown",
+        };
+        let exit = if liveness == Liveness::Exited {
+            exit_code.map_or_else(|| "unknown".into(), |code| code.to_string())
+        } else {
+            "not_applicable".into()
+        };
+        format!(
+            "phase={phase} pid={} snapshot_name={} win32_error={error} symbolic={} alive={alive} exit_code={exit}",
+            entry.pid,
+            safe_snapshot_name(&entry.name),
+            win32_error_name(error),
+        )
+    }
+    fn identity(
+        entry: &ProcessEntry,
+        expected_python: &Path,
+        phase: &'static str,
+    ) -> Result<ProcessIdentity> {
         let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.pid) };
         if raw.is_null() {
             return fail(
@@ -565,6 +651,12 @@ mod runner {
         let mut buffer = vec![0_u16; 32768];
         let mut size = buffer.len() as u32;
         if unsafe { QueryFullProcessImageNameW(raw, 0, buffer.as_mut_ptr(), &mut size) } == 0 {
+            let error = unsafe { GetLastError() };
+            let (liveness, exit_code) = probe_liveness(entry.pid, raw);
+            emit(
+                "PROCESS_IMAGE_QUERY_FAILED",
+                &image_query_diagnostic(phase, entry, error, liveness, exit_code),
+            );
             return fail(
                 "MONITOR_UNAVAILABLE",
                 "process executable path could not be read",
@@ -621,7 +713,7 @@ mod runner {
             .into_iter()
             .filter(|row| row.name.eq_ignore_ascii_case(DESKTOP))
         {
-            let candidate = identity(&row, fixed_python)?;
+            let candidate = identity(&row, fixed_python, "preflight")?;
             if same_path(&candidate.path, exe) {
                 return fail(
                     "DESKTOP_ALREADY_RUNNING",
@@ -661,7 +753,7 @@ mod runner {
                 "MONITOR_UNAVAILABLE",
                 "created Desktop process not found",
             ))?;
-        let record = identity(&row, fixed_python)?;
+        let record = identity(&row, fixed_python, "desktop_corroboration")?;
         if !same_path(&record.path, exe) {
             return fail(
                 "MONITOR_UNAVAILABLE",
@@ -682,7 +774,7 @@ mod runner {
         let exit_code = loop {
             let entries = process_entries()?;
             for row in descendants(&entries, root_pid) {
-                let record = identity(&row, fixed_python)?;
+                let record = identity(&row, fixed_python, "descendant_observation")?;
                 if record.created < root_created {
                     return fail("MONITOR_UNAVAILABLE", "descendant predates Desktop process");
                 }
@@ -725,7 +817,7 @@ mod runner {
             if known.is_none() && !likely_python && !likely_webview {
                 continue;
             }
-            let record = identity(row, fixed_python)?;
+            let record = identity(row, fixed_python, "orphan_sweep")?;
             let same_known = known.is_some_and(|old| {
                 old.created == record.created && same_path(&old.path, &record.path)
             });
@@ -952,6 +1044,54 @@ mod runner {
             assert_eq!(injected.unwrap_err().code, "MONITOR_UNAVAILABLE");
             desktop.stop();
             assert!(desktop.child.try_wait().unwrap().is_some());
+        }
+        #[test]
+        fn image_query_diagnostic_classifies_access_failure_without_paths() {
+            let row = ProcessEntry {
+                pid: 42,
+                parent: 1,
+                name: "Z:\\fixture\\bad.exe\n".into(),
+            };
+            let line = image_query_diagnostic(
+                "descendant_observation",
+                &row,
+                ERROR_ACCESS_DENIED,
+                Liveness::Unknown,
+                None,
+            );
+            assert!(line.contains("phase=descendant_observation pid=42"));
+            assert!(line.contains("win32_error=5 symbolic=ERROR_ACCESS_DENIED"));
+            assert!(line.contains("alive=unknown exit_code=not_applicable"));
+            assert!(!line.contains("fixture"));
+            assert!(!line.contains('\\'));
+            assert!(!line.contains('\n'));
+            assert_eq!(win32_error_name(12_345), "UNKNOWN_WIN32_ERROR");
+        }
+        #[test]
+        fn liveness_diagnostic_recognizes_exited_target() {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .arg("--list")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let status = child.wait().unwrap();
+            assert!(status.success());
+            let (liveness, exit_code) = probe_liveness(child.id(), child.as_raw_handle() as HANDLE);
+            assert_eq!(liveness, Liveness::Exited);
+            assert_eq!(exit_code, status.code().map(|code| code as u32));
+        }
+        #[test]
+        fn image_query_reads_current_process_normally() {
+            let current = std::env::current_exe().unwrap();
+            let row = ProcessEntry {
+                pid: std::process::id(),
+                parent: 0,
+                name: RUNNER.into(),
+            };
+            let record = identity(&row, Path::new("not-python.exe"), "test").unwrap();
+            assert!(same_path(&record.path, &current));
+            assert!(!record.python);
         }
     }
 }
