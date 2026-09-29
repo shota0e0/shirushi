@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Abstract botanical demo artwork</title>
+  <desc id="desc">A calm abstract composition of paper shapes, leaves, and a warm sun.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f0eadf"/>
+      <stop offset="1" stop-color="#dce9df"/>
+    </linearGradient>
+    <linearGradient id="hill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7d9d8f"/>
+      <stop offset="1" stop-color="#456d62"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#334941" flood-opacity=".18"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="1000" fill="url(#paper)"/>
+  <circle cx="1225" cy="235" r="125" fill="#e8b78b" opacity=".88"/>
+  <path d="M0 760C270 610 490 640 710 742c260 121 521 80 890-116v374H0Z" fill="#b8cabb"/>
+  <path d="M0 885c324-180 635-178 934-54 216 90 438 55 666-66v235H0Z" fill="url(#hill)"/>
+  <g filter="url(#shadow)" transform="translate(350 170)">
+    <path d="M188 599C54 470 15 307 65 151c31-98 89-138 174-119 67 15 103 75 84 131-22 64-86 81-137 59 23 81 87 152 192 208Z" fill="#f7f1e8"/>
+    <path d="M192 589c32-170 35-335 12-496" fill="none" stroke="#3e6e61" stroke-width="18" stroke-linecap="round"/>
+    <path d="M201 337c85-46 143-108 176-186-103 11-167 73-176 186ZM190 424c-72-54-124-119-154-195 93 18 148 81 154 195Z" fill="#6d9383"/>
+  </g>
+  <g opacity=".36" fill="none" stroke="#fff" stroke-width="3">
+    <path d="M100 120h340M100 148h235"/>
+    <path d="M1180 780h300M1260 812h220"/>
+  </g>
+</svg>
