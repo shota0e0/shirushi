@@ -1,0 +1,8 @@
+packaging/license_sources/f2c6-rust/alloc-stdlib/LICENSE -text
+packaging/license_sources/f2c6-rust/defmt/LICENSE-APACHE -text
+packaging/license_sources/f2c6-rust/defmt/LICENSE-MIT -text
+packaging/license_sources/f2c6-rust/selectors/MPL-2.0.txt -text
+packaging/license_sources/f2c6-rust/rust-unic/COPYRIGHT.md -text
+packaging/license_sources/f2c6-rust/rust-unic/LICENSE-APACHE -text
+packaging/license_sources/f2c6-rust/rust-unic/LICENSE-MIT -text
+packaging/license_sources/f2c6-rust/webview2-rs/LICENSE -text

@@ -99,6 +99,69 @@ NIKI_FIXTURE = {
 MAX_METADATA_PACKAGES = 2048
 MAX_PREFLIGHT_OUTPUT_BYTES = 262_144
 
+# Exact locked crates whose published archives omit the upstream workspace's
+# license material. Native package files take precedence over these copies.
+_ALLOC_LICENSE = (
+    ("LICENSE", "packaging/license_sources/f2c6-rust/alloc-stdlib/LICENSE",
+     "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+     "https://api.github.com/repos/dropbox/rust-alloc-no-stdlib/git/blobs/cd496ba72eb37e83a44958358d1f89a8a28cbc15"),
+)
+_DEFMT_LICENSES = (
+    ("LICENSE-APACHE", "packaging/license_sources/f2c6-rust/defmt/LICENSE-APACHE",
+     "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+     "https://api.github.com/repos/knurling-rs/defmt/git/blobs/11069edd79019f7dafbe3138841cf289209270dd"),
+    ("LICENSE-MIT", "packaging/license_sources/f2c6-rust/defmt/LICENSE-MIT",
+     "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+     "https://api.github.com/repos/knurling-rs/defmt/git/blobs/e68a7ab37c8accca023db5f1505d48e4375d4324"),
+)
+_SELECTORS_LICENSE = (
+    ("MPL-2.0.txt", "packaging/license_sources/f2c6-rust/selectors/MPL-2.0.txt",
+     "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+     "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt"),
+)
+_UNIC_LICENSES = (
+    ("COPYRIGHT.md", "packaging/license_sources/f2c6-rust/rust-unic/COPYRIGHT.md",
+     "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+     "https://api.github.com/repos/open-i18n/rust-unic/git/blobs/0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3"),
+    ("LICENSE-APACHE", "packaging/license_sources/f2c6-rust/rust-unic/LICENSE-APACHE",
+     "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+     "https://api.github.com/repos/open-i18n/rust-unic/git/blobs/16fe87b06e802f094b3fbb0894b137bca2b16ef1"),
+    ("LICENSE-MIT", "packaging/license_sources/f2c6-rust/rust-unic/LICENSE-MIT",
+     "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+     "https://api.github.com/repos/open-i18n/rust-unic/git/blobs/31aa79387f27e730e33d871925e152e35e428031"),
+)
+_WEBVIEW_LICENSE = (
+    ("LICENSE", "packaging/license_sources/f2c6-rust/webview2-rs/LICENSE",
+     "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+     "https://api.github.com/repos/wravery/webview2-rs/git/blobs/de9a7e660e173136b351982a34f715af424ff812"),
+)
+# Key: crate name, version, Cargo.lock checksum, declared license expression.
+# Value: repository, .cargo_vcs_info commit/path, copied material with source URL.
+LICENSE_SUPPLEMENTS = {
+    ("alloc-stdlib", "0.2.4", "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195", "BSD-3-Clause"):
+        ("https://github.com/dropbox/rust-alloc-no-stdlib", "ae42d22078b98549e987d2f03d12df7b984fde47", "alloc-stdlib", _ALLOC_LICENSE),
+    ("defmt-parser", "1.0.0", "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e", "MIT OR Apache-2.0"):
+        ("https://github.com/knurling-rs/defmt", "4a8cdb44891ed57b8ff5a023b6bec7137c48708f", "parser", _DEFMT_LICENSES),
+    ("selectors", "0.36.1", "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c", "MPL-2.0"):
+        ("https://github.com/servo/stylo", "635e1a19d02960588a00e189bd4bd5bdb150ec3d", "selectors", _SELECTORS_LICENSE),
+    ("unic-char-property", "0.9.0", "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221", "MIT/Apache-2.0"):
+        ("https://github.com/open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016", None, _UNIC_LICENSES),
+    ("unic-char-range", "0.9.0", "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc", "MIT/Apache-2.0"):
+        ("https://github.com/open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016", None, _UNIC_LICENSES),
+    ("unic-common", "0.9.0", "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc", "MIT/Apache-2.0"):
+        ("https://github.com/open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016", None, _UNIC_LICENSES),
+    ("unic-ucd-ident", "0.9.0", "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987", "MIT/Apache-2.0"):
+        ("https://github.com/open-i18n/rust-unic", "8a6ce83063d90b91ae2ce59eddb803edd393fca9", None, _UNIC_LICENSES),
+    ("unic-ucd-version", "0.9.0", "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4", "MIT/Apache-2.0"):
+        ("https://github.com/open-i18n/rust-unic", "5878605364af97a3358368a6eaef02104af2e016", None, _UNIC_LICENSES),
+    ("webview2-com", "0.38.2", "7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a", "MIT"):
+        ("https://github.com/wravery/webview2-rs", "b74dc5e2b394044bea5191052868ce7a106c202c", "crates/webview2-com", _WEBVIEW_LICENSE),
+    ("webview2-com-macros", "0.8.1", "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54", "MIT"):
+        ("https://github.com/wravery/webview2-rs", "dffa41a8a46d3f5565eefbff2de57d38d399f158", "crates/callback-macros", _WEBVIEW_LICENSE),
+    ("webview2-com-sys", "0.38.2", "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c", "MIT"):
+        ("https://github.com/wravery/webview2-rs", "b74dc5e2b394044bea5191052868ce7a106c202c", "crates/bindings", _WEBVIEW_LICENSE),
+}
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -337,6 +400,39 @@ def _dependency_license_context(
         if child.is_file() and LICENSE_NAMES.fullmatch(child.name):
             require(not _linked(child), f"linked license text: {name}")
             candidates.setdefault(child.name, child)
+    locked = lock[key]
+    lock_checksum = locked.get("checksum")
+    require(
+        source is None or (isinstance(lock_checksum, str) and HEX_SHA256.fullmatch(lock_checksum)),
+        f"locked registry checksum missing or invalid: {name} {version}",
+    )
+    if not candidates and source == CRATES_IO_SOURCE:
+        supplement = LICENSE_SUPPLEMENTS.get(
+            (name, version, lock_checksum, license_expression)
+        )
+        if supplement is not None:
+            expected_repo, expected_commit, expected_path, materials = supplement
+            repository = package.get("repository")
+            require(
+                isinstance(repository, str) and repository.rstrip("/") == expected_repo,
+                f"package repository provenance mismatch: {name} {version}",
+            )
+            vcs_path = package_root / ".cargo_vcs_info.json"
+            require(vcs_path.is_file() and not _linked(vcs_path),
+                    f"missing package VCS provenance: {name} {version}")
+            vcs = _json_load_exact(vcs_path.read_bytes(), f"{name} VCS provenance")
+            require(
+                isinstance(vcs, dict) and isinstance(vcs.get("git"), dict)
+                and vcs["git"].get("sha1") == expected_commit
+                and vcs.get("path_in_vcs") == expected_path,
+                f"package VCS provenance mismatch: {name} {version}",
+            )
+            for file_name, source_path, expected_hash, _source_url in materials:
+                copied = regular_file(source_root, source_path)
+                require(sha256(copied.read_bytes()) == expected_hash,
+                        f"supplemental license hash mismatch: {name}/{file_name}")
+                require(file_name not in candidates, "duplicate supplemental license name")
+                candidates[file_name] = copied
     if name == "shirushi-desktop":
         project_license_path = source_root / "LICENSE"
         require(
@@ -346,12 +442,6 @@ def _dependency_license_context(
         project_license = project_license_path.resolve(strict=True)
         require(project_license.is_relative_to(source_root.resolve(strict=True)), "project license escape")
         candidates.setdefault("LICENSE", project_license)
-    locked = lock[key]
-    lock_checksum = locked.get("checksum")
-    require(
-        source is None or (isinstance(lock_checksum, str) and HEX_SHA256.fullmatch(lock_checksum)),
-        f"locked registry checksum missing or invalid: {name} {version}",
-    )
     return {
         "name": name,
         "version": version,

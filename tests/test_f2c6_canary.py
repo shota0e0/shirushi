@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -152,6 +153,161 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         destination = self.case / name
         shutil.copytree(original, destination)
         return destination
+
+    def prepare_missing_license_crates(self):
+        expected_names = {
+            "alloc-stdlib", "defmt-parser", "selectors", "unic-char-property",
+            "unic-char-range", "unic-common", "unic-ucd-ident",
+            "unic-ucd-version", "webview2-com", "webview2-com-macros",
+            "webview2-com-sys",
+        }
+        self.assertEqual(expected_names, {key[0] for key in PACKAGE.LICENSE_SUPPLEMENTS})
+        self.assertEqual(11, len(PACKAGE.LICENSE_SUPPLEMENTS))
+        lock_path = PROJECT / "desktop/Cargo.lock"
+        lock = PACKAGE._lock_index(lock_path)
+        self.write(self.source, "desktop/Cargo.lock", lock_path.read_bytes())
+        metadata = json.loads(self.metadata.read_text(encoding="utf-8"))
+        root = metadata["packages"][0]
+        root_id = root["id"]
+        metadata["packages"] = [root]
+        metadata["resolve"]["nodes"] = [{"id": root_id, "deps": []}]
+        package_roots = {}
+        source_paths = set()
+        for (name, version, checksum, expression), (repo, commit, path_in_vcs, materials) in sorted(
+            PACKAGE.LICENSE_SUPPLEMENTS.items()
+        ):
+            self.assertEqual(checksum, lock[(name, version, PACKAGE.CRATES_IO_SOURCE)]["checksum"])
+            crate_root = self.case / "registry" / f"{name}-{version}"
+            crate_root.mkdir()
+            self.write(crate_root, "Cargo.toml", f"[package]\nname='{name}'\nversion='{version}'\n")
+            vcs = {"git": {"sha1": commit}}
+            if path_in_vcs is not None:
+                vcs["path_in_vcs"] = path_in_vcs
+            self.write(crate_root, ".cargo_vcs_info.json", json.dumps(vcs))
+            package_roots[name] = crate_root
+            package_id = f"{PACKAGE.CRATES_IO_SOURCE}#{name}@{version}"
+            metadata["packages"].append({
+                "id": package_id, "name": name, "version": version,
+                "source": PACKAGE.CRATES_IO_SOURCE,
+                "repository": repo,
+                "manifest_path": str((crate_root / "Cargo.toml").resolve()),
+                "license": expression, "license_file": None,
+            })
+            metadata["resolve"]["nodes"][0]["deps"].append({"pkg": package_id})
+            metadata["resolve"]["nodes"].append({"id": package_id, "deps": []})
+            for file_name, source_path, digest, source_url in materials:
+                self.assertEqual(file_name, Path(source_path).name)
+                raw = (PROJECT / source_path).read_bytes()
+                self.assertEqual(digest, PACKAGE.sha256(raw))
+                if name == "selectors":
+                    self.assertEqual(
+                        "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+                        source_url,
+                    )
+                else:
+                    prefix = repo.replace(
+                        "https://github.com/", "https://api.github.com/repos/"
+                    ) + "/git/blobs/"
+                    blob = b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw
+                    self.assertEqual(prefix + hashlib.sha1(blob).hexdigest(), source_url)
+                if source_path not in source_paths:
+                    self.write(self.source, source_path, raw)
+                    source_paths.add(source_path)
+        actual_paths = {
+            path.relative_to(PROJECT).as_posix()
+            for path in (PROJECT / "packaging/license_sources/f2c6-rust").rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(source_paths, actual_paths)
+        self.assertEqual(8, len(source_paths))
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        return metadata, package_roots, source_paths
+
+    def test_exact_eleven_license_supplements_and_artifact_manifest(self):
+        _, _, source_paths = self.prepare_missing_license_crates()
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual("PASS", report["audit"])
+        self.assertEqual(0, report["missingLicenseTextCount"])
+        document, texts = PACKAGE.collect_dependency_licenses(self.source, self.metadata)
+        inventory = json.loads(document)
+        self.assertEqual(12, inventory["packageCount"])
+        by_name = {item["name"]: item for item in inventory["packages"]}
+        for (name, _, _, _), (_, _, _, materials) in PACKAGE.LICENSE_SUPPLEMENTS.items():
+            self.assertEqual(
+                {file_name for file_name, _, _, _ in materials},
+                {item["sourceFileName"] for item in by_name[name]["materials"]},
+            )
+            self.assertEqual(
+                {digest for _, _, digest, _ in materials},
+                {item["sha256"] for item in by_name[name]["materials"]},
+            )
+        self.assertEqual(8, len(source_paths))
+        self.assertEqual(9, len(texts))  # eight supplements plus the project LICENSE
+        output = self.create("supplemented-package")
+        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        names = {item["path"] for item in manifest["files"]}
+        self.assertEqual(
+            PACKAGE.CORE_FILES | PACKAGE.GENERATED_FILES | set(texts),
+            names,
+        )
+        self.assertEqual("PASS", PACKAGE.audit_package(output)["audit"])
+
+    def test_license_supplement_provenance_and_hash_fail_closed(self):
+        metadata, roots, _ = self.prepare_missing_license_crates()
+        defmt = next(item for item in metadata["packages"] if item["name"] == "defmt-parser")
+        defmt["repository"] = "https://github.com/not-the-owner/defmt"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "repository provenance mismatch"):
+            PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        defmt["repository"] = "https://github.com/knurling-rs/defmt"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        marker = roots["defmt-parser"] / ".cargo_vcs_info.json"
+        marker.write_text('{"git":{"sha1":"' + "0" * 40 + '"},"path_in_vcs":"parser"}',
+                          encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "VCS provenance mismatch"):
+            PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        expected_commit = PACKAGE.LICENSE_SUPPLEMENTS[next(
+            key for key in PACKAGE.LICENSE_SUPPLEMENTS if key[0] == "defmt-parser"
+        )][1]
+        marker.write_text(json.dumps({
+            "git": {"sha1": expected_commit}, "path_in_vcs": "parser"
+        }), encoding="utf-8")
+        copied = self.source / "packaging/license_sources/f2c6-rust/defmt/LICENSE-MIT"
+        copied.write_bytes(copied.read_bytes() + b"tamper")
+        with self.assertRaisesRegex(ValueError, "supplemental license hash mismatch"):
+            PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.write(self.source, "packaging/license_sources/f2c6-rust/defmt/LICENSE-MIT",
+                   (PROJECT / "packaging/license_sources/f2c6-rust/defmt/LICENSE-MIT").read_bytes())
+        defmt["license"] = "MIT"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual("FAIL", report["audit"])
+        self.assertEqual(["defmt-parser"], [item["name"] for item in report["missingLicenseTexts"]])
+        defmt["license"] = "MIT OR Apache-2.0"
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        lock_path = self.source / "desktop/Cargo.lock"
+        lock_text = lock_path.read_text(encoding="utf-8")
+        defmt_checksum = next(
+            key[2] for key in PACKAGE.LICENSE_SUPPLEMENTS if key[0] == "defmt-parser"
+        )
+        self.assertEqual(1, lock_text.count(defmt_checksum))
+        lock_path.write_text(lock_text.replace(defmt_checksum, "f" * 64), encoding="utf-8")
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual("FAIL", report["audit"])
+        self.assertEqual(["defmt-parser"], [item["name"] for item in report["missingLicenseTexts"]])
+
+    def test_native_license_material_takes_precedence_over_supplement(self):
+        _, roots, _ = self.prepare_missing_license_crates()
+        native = b"Native crate license text\n"
+        self.write(roots["alloc-stdlib"], "LICENSE", native)
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual("PASS", report["audit"])
+        document, texts = PACKAGE.collect_dependency_licenses(self.source, self.metadata)
+        by_name = {item["name"]: item for item in json.loads(document)["packages"]}
+        self.assertEqual(["LICENSE"], [
+            item["sourceFileName"] for item in by_name["alloc-stdlib"]["materials"]
+        ])
+        self.assertIn(native, texts.values())
 
     def test_positive_exact_package_and_manifest(self):
         actual_manifest = tomllib.loads((PROJECT / "desktop/Cargo.toml").read_text(encoding="utf-8"))
