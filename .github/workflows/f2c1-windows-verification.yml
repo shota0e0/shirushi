@@ -2,6 +2,12 @@ name: F2C.1 Windows verification
 
 on:
   workflow_dispatch:
+    inputs:
+      first_rust_only:
+        description: "Run only the F3A first Rust-test gate; no runtime, package or upload"
+        type: boolean
+        required: false
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -14,9 +20,79 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  first_rust:
+    name: F3A First Rust-test Gate only
+    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      EVIDENCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out exact first-gate source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install and assert pinned Windows Rust toolchain
+        id: rust_setup
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $targets = rustup target list --toolchain $env:RUSTUP_TOOLCHAIN --installed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (@($targets) -notcontains "x86_64-pc-windows-msvc") { throw "Pinned MSVC target is not installed" }
+          $rustVersion = rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $rustVersion.StartsWith("rustc 1.97.1 ")) { throw "Unexpected Rust version" }
+          $cargoVersion = cargo --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $cargoVersion.StartsWith("cargo 1.97.1 ")) { throw "Unexpected Cargo version" }
+          $checkedOutSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($checkedOutSha -ne $env:EVIDENCE_SHA) { throw "Checkout SHA differs from tested SHA" }
+          "Tested SHA: $checkedOutSha"
+          "Rust: $rustVersion"
+          "Cargo: $cargoVersion"
+          "Runner SHA-256: $((Get-FileHash -LiteralPath desktop\src\bin\shirushi-limited-canary.rs -Algorithm SHA256).Hash.ToLowerInvariant())"
+          "Cargo.lock SHA-256: $((Get-FileHash -LiteralPath desktop\Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant())"
+
+      - name: Fetch locked Rust dependencies for first gate
+        id: cargo_fetch
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run deferred limited-runner Rust tests offline
+        id: cargo_test
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --features manual-canary --bin shirushi-limited-canary --manifest-path desktop\Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record first-gate-only evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = @(
+            "# F3A First Rust-test Gate only",
+            "Tested SHA: $env:EVIDENCE_SHA",
+            "Checkout: ${{ steps.checkout.outcome }}",
+            "Pinned Rust setup: ${{ steps.rust_setup.outcome }}",
+            "Locked Rust fetch: ${{ steps.cargo_fetch.outcome }}",
+            "Deferred Rust tests: ${{ steps.cargo_test.outcome }}",
+            "Runtime construction, package generation and artifact upload: NOT RUN",
+            "This first gate does not run or replace the normal F2C verification mode.",
+            "Owner Review STOP after PASS or FAIL. Full F3A: NOT READY."
+          )
+          $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
   verify:
     name: Frozen F2C.1 source verification
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: inputs.first_rust_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-2025
     timeout-minutes: 60
     env:
