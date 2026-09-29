@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Local bundled main window only; no plugin authority and no remote origins.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "allow-bridge-get-capabilities",
+    "allow-bridge-load-personal-mark"
+  ]
+}

@@ -1,0 +1,22 @@
+import { normalizeLocale } from "../i18n.js";
+
+export const DESKTOP_MESSAGES = Object.freeze({
+  ja: { starting: "Python bridgeに接続中…", ready: "Python bridge 接続済み", failed: "Python bridgeを利用できません。アプリを再起動してください。", reload: "保存済みしるしを再読込", boundary: "Desktop Foundation：保存済みしるしの読込のみ。追加・確認・保存は未接続です。", preview: "画像はローカルPreviewのみ。ネイティブの処理対象ではありません。", absent: "保存済みのしるしはありません", typed: "Typed v2を読み込みました", handwritten: "Handwritten v2を読み込みました", legacy: "Legacy v1を読み込みました（元の描画領域は不明）", malformed: "保存データが不正です。書換えは行っていません。", unsupported: "保存データの形式は未対応です", io_error: "保存データを読み込めません", assets: "描画資産未採用 — Markの再描画は行いません", profile: "未対応renderProfile — 代替描画は行いません", readOnly: "読込専用・画像の検証結果ではありません", notLoaded: "保存済みしるしは未読込", strokes: "ストローク", details: "固定されたPython bridgeで、capabilitiesと保存済みPersonal Markを読みます。Markの編集・保存、画像へのAdd、Verify、C2PAは未接続です。native pathや実行コマンドはWebへ公開しません。" },
+  en: { starting: "Connecting to Python bridge…", ready: "Python bridge connected", failed: "Python bridge unavailable. Restart the app.", reload: "Reload saved mark", boundary: "Desktop Foundation: saved-mark reading only. Add, Verify and save are unavailable.", preview: "Images are local previews, not native processing targets.", absent: "No saved mark", typed: "Typed v2 loaded", handwritten: "Handwritten v2 loaded", legacy: "Legacy v1 loaded (capture geometry unknown)", malformed: "Saved data is malformed. Nothing was rewritten.", unsupported: "Saved format is unsupported", io_error: "Saved data could not be read", assets: "Render assets unavailable — mark is not redrawn", profile: "Unsupported renderProfile — no fallback rendering", readOnly: "Read-only profile, not an image verification result", notLoaded: "Saved mark not loaded", strokes: "strokes", details: "A fixed Python bridge reads capabilities and the saved Personal Mark. Editing/saving, image Add, Verify and C2PA are unavailable. Web receives no native paths or execution commands." },
+  "zh-CN": { starting: "正在连接Python bridge…", ready: "Python bridge已连接", failed: "Python bridge不可用。请重启应用。", reload: "重新读取已保存印记", boundary: "Desktop Foundation：仅支持读取已保存印记。添加、验证和保存尚未连接。", preview: "图片仅用于本地预览，不是原生处理目标。", absent: "没有已保存印记", typed: "已读取Typed v2", handwritten: "已读取Handwritten v2", legacy: "已读取Legacy v1（原始绘图区域未知）", malformed: "保存数据无效。未改写任何数据。", unsupported: "不支持此保存格式", io_error: "无法读取保存数据", assets: "绘制资源未就绪 — 不重绘印记", profile: "不支持此renderProfile — 不使用替代绘制", readOnly: "只读个人印记，并非图片验证结果", notLoaded: "尚未读取已保存印记", strokes: "笔画", details: "固定的Python bridge读取功能列表和已保存的Personal Mark。编辑、保存、图片Add、Verify和C2PA尚未连接。不会向Web公开原生路径或执行命令。" },
+  "zh-TW": { starting: "正在連接Python bridge…", ready: "Python bridge已連接", failed: "Python bridge無法使用。請重新啟動應用程式。", reload: "重新讀取已儲存印記", boundary: "Desktop Foundation：僅支援讀取已儲存印記。加入、驗證與儲存尚未連接。", preview: "圖片僅用於本機預覽，不是原生處理目標。", absent: "沒有已儲存印記", typed: "已讀取Typed v2", handwritten: "已讀取Handwritten v2", legacy: "已讀取Legacy v1（原始繪圖區域未知）", malformed: "儲存資料無效。未改寫任何資料。", unsupported: "不支援此儲存格式", io_error: "無法讀取儲存資料", assets: "繪製資源尚未就緒 — 不重繪印記", profile: "不支援此renderProfile — 不使用替代繪製", readOnly: "唯讀個人印記，並非圖片驗證結果", notLoaded: "尚未讀取已儲存印記", strokes: "筆畫", details: "固定的Python bridge讀取功能清單與已儲存的Personal Mark。編輯、儲存、圖片Add、Verify和C2PA尚未連接。不向Web公開原生路徑或執行命令。" },
+  ko: { starting: "Python bridge 연결 중…", ready: "Python bridge 연결됨", failed: "Python bridge를 사용할 수 없습니다. 앱을 다시 시작하세요.", reload: "저장된 표시 다시 읽기", boundary: "Desktop Foundation: 저장된 표시 읽기만 지원합니다. 추가, 검증, 저장은 연결되지 않았습니다.", preview: "이미지는 로컬 미리보기이며 네이티브 처리 대상이 아닙니다.", absent: "저장된 표시 없음", typed: "Typed v2 읽기 완료", handwritten: "Handwritten v2 읽기 완료", legacy: "Legacy v1 읽기 완료(원래 그리기 영역 알 수 없음)", malformed: "저장 데이터가 올바르지 않습니다. 변경하지 않았습니다.", unsupported: "지원하지 않는 저장 형식", io_error: "저장 데이터를 읽을 수 없음", assets: "렌더링 리소스 미준비 — 표시를 다시 그리지 않음", profile: "지원하지 않는 renderProfile — 대체 렌더링 없음", readOnly: "읽기 전용 프로필이며 이미지 검증 결과가 아님", notLoaded: "저장된 표시를 읽지 않음", strokes: "획", details: "고정 Python bridge로 기능과 저장된 Personal Mark를 읽습니다. 편집, 저장, 이미지 Add, Verify, C2PA는 연결되지 않았습니다. Web에 네이티브 경로나 실행 명령을 공개하지 않습니다." },
+});
+
+const CONNECTION_OBSERVATION = Object.freeze({
+  ja: "Python bridge 接続確認済み（再読込で再確認）",
+  en: "Python bridge checked (reload to recheck)",
+  "zh-CN": "Python bridge连接已确认（重新读取以再确认）",
+  "zh-TW": "Python bridge連線已確認（重新讀取以再確認）",
+  ko: "Python bridge 연결 확인됨(다시 읽기로 재확인)",
+});
+
+export function desktopMessages(locale) {
+  const key = normalizeLocale(locale);
+  return { ...DESKTOP_MESSAGES[key], ready: CONNECTION_OBSERVATION[key] };
+}
