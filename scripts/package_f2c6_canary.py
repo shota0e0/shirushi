@@ -20,8 +20,12 @@ from typing import Callable
 SCHEMA_VERSION = 1
 ARTIFACT_TYPE = "DEVELOPMENT_CANARY"
 TARGET_TRIPLE = "x86_64-pc-windows-msvc"
+CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+PACKAGE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,127}\Z")
+LICENSE_EXPRESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .+()/:-]{0,255}\Z")
 DEPENDENCY_TEXT = re.compile(r"THIRD_PARTY_LICENSES/texts/[0-9a-f]{64}\.txt\Z")
 LICENSE_NAMES = re.compile(
     r"(?:licen[cs]e|copying|copyright|notice)(?:[-_.].*)?\Z", re.IGNORECASE
@@ -92,6 +96,8 @@ NIKI_FIXTURE = {
     "text": "Niki",
     "renderProfile": {"id": "shirushi-typed", "version": 1},
 }
+MAX_METADATA_PACKAGES = 2048
+MAX_PREFLIGHT_OUTPUT_BYTES = 262_144
 
 
 def require(condition: bool, message: str) -> None:
@@ -227,9 +233,22 @@ def _source_audit(source_root: Path) -> dict[str, object]:
 
 def _lock_index(lock_path: Path) -> dict[tuple[str, str, str | None], dict[str, object]]:
     lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    packages = lock.get("package")
+    require(isinstance(packages, list), "Cargo.lock package list missing")
+    require(len(packages) <= MAX_METADATA_PACKAGES, "Cargo.lock package count exceeds limit")
     result: dict[tuple[str, str, str | None], dict[str, object]] = {}
-    for package in lock.get("package", []):
-        key = (package["name"], package["version"], package.get("source"))
+    for package in packages:
+        require(isinstance(package, dict), "invalid package in Cargo.lock")
+        name = package.get("name")
+        version = package.get("version")
+        source = package.get("source")
+        require(
+            isinstance(name, str) and PACKAGE_NAME.fullmatch(name) is not None
+            and isinstance(version, str) and PACKAGE_VERSION.fullmatch(version) is not None
+            and (source is None or (isinstance(source, str) and len(source) <= 512)),
+            "invalid package identity in Cargo.lock",
+        )
+        key = (name, version, source)
         require(key not in result, f"duplicate package in Cargo.lock: {key[0]} {key[1]}")
         result[key] = package
     return result
@@ -257,10 +276,133 @@ def _resolved_package_ids(metadata: dict[str, object]) -> set[str]:
     while pending:
         current = pending.pop()
         if current not in reached:
-            require(current in graph, f"cargo dependency node missing: {current}")
+            require(current in graph, "cargo dependency node missing")
             reached.add(current)
             pending.extend(graph[current] - reached)
     return reached
+
+
+def _dependency_license_context(
+    source_root: Path,
+    package: dict[str, object],
+    lock: dict[tuple[str, str, str | None], dict[str, object]],
+) -> tuple[dict[str, object], dict[str, Path]]:
+    name = package.get("name")
+    version = package.get("version")
+    source = package.get("source")
+    manifest_path = package.get("manifest_path")
+    license_expression = package.get("license")
+    license_file = package.get("license_file")
+    require(
+        isinstance(name, str) and PACKAGE_NAME.fullmatch(name) is not None
+        and isinstance(version, str) and PACKAGE_VERSION.fullmatch(version) is not None
+        and (source is None or source == CRATES_IO_SOURCE)
+        and isinstance(manifest_path, str) and manifest_path != ""
+        and (license_file is None or (isinstance(license_file, str) and license_file != "")),
+        "invalid cargo package provenance",
+    )
+    key = (name, version, source)
+    require(key in lock, f"cargo metadata package is not locked: {name} {version}")
+    if source is None:
+        require(name == "shirushi-desktop", "unexpected unlocked path dependency")
+    require(
+        (isinstance(license_expression, str) and license_expression.strip() != "")
+        or isinstance(license_file, str),
+        f"dependency has no declared license: {name} {version}",
+    )
+    if isinstance(license_expression, str):
+        license_expression = license_expression.strip()
+        require(
+            LICENSE_EXPRESSION.fullmatch(license_expression) is not None,
+            f"dependency has malformed license expression: {name} {version}",
+        )
+        require(
+            license_expression.casefold()
+            not in {"unknown", "none", "proprietary", "unlicensed"},
+            f"dependency has unknown license: {name} {version}",
+        )
+    package_root = Path(manifest_path).resolve(strict=True).parent
+    require(package_root.is_dir() and not _linked(package_root), f"invalid package root: {name}")
+    candidates: dict[str, Path] = {}
+    if isinstance(license_file, str):
+        declared = Path(license_file)
+        if not declared.is_absolute():
+            declared = package_root / declared
+        require(declared.is_file() and not _linked(declared), f"invalid license-file: {name}")
+        declared = declared.resolve(strict=True)
+        require(declared.is_relative_to(package_root), f"license-file escapes package: {name}")
+        _require_unlinked_chain(package_root, declared, f"license-file: {name}")
+        candidates[declared.name] = declared
+    for child in package_root.iterdir():
+        if child.is_file() and LICENSE_NAMES.fullmatch(child.name):
+            require(not _linked(child), f"linked license text: {name}")
+            candidates.setdefault(child.name, child)
+    if name == "shirushi-desktop":
+        project_license_path = source_root / "LICENSE"
+        require(
+            project_license_path.is_file() and not _linked(project_license_path),
+            "project license missing or linked",
+        )
+        project_license = project_license_path.resolve(strict=True)
+        require(project_license.is_relative_to(source_root.resolve(strict=True)), "project license escape")
+        candidates.setdefault("LICENSE", project_license)
+    locked = lock[key]
+    lock_checksum = locked.get("checksum")
+    require(
+        source is None or (isinstance(lock_checksum, str) and HEX_SHA256.fullmatch(lock_checksum)),
+        f"locked registry checksum missing or invalid: {name} {version}",
+    )
+    return {
+        "name": name,
+        "version": version,
+        "sourceId": source,
+        "lockChecksum": lock_checksum,
+        "licenseExpression": license_expression,
+    }, candidates
+
+
+def preflight_dependency_licenses(source_root: Path, metadata_path: Path) -> dict[str, object]:
+    metadata = _json_load_exact(metadata_path.read_bytes(), "cargo metadata")
+    require(isinstance(metadata, dict), "cargo metadata root is not an object")
+    packages = metadata.get("packages")
+    require(isinstance(packages, list), "cargo metadata packages missing")
+    require(len(packages) <= MAX_METADATA_PACKAGES, "cargo metadata package count exceeds limit")
+    by_id = {
+        package["id"]: package
+        for package in packages
+        if isinstance(package, dict) and isinstance(package.get("id"), str)
+    }
+    require(len(by_id) == len(packages), "invalid or duplicate cargo package id")
+    resolved = _resolved_package_ids(metadata)
+    require(len(resolved) <= MAX_METADATA_PACKAGES, "resolved package count exceeds limit")
+    lock = _lock_index(source_root / "desktop/Cargo.lock")
+    missing: list[dict[str, object]] = []
+    seen_missing: set[tuple[str, str, str | None]] = set()
+    for package_id in sorted(resolved):
+        require(package_id in by_id, "resolved cargo package missing metadata")
+        identity, candidates = _dependency_license_context(source_root, by_id[package_id], lock)
+        if not candidates:
+            key = (identity["name"], identity["version"], identity["sourceId"])
+            require(key not in seen_missing, "duplicate missing-license package identity")
+            seen_missing.add(key)
+            missing.append(identity)
+    missing.sort(key=lambda item: (item["name"], item["version"], item["sourceId"] or ""))
+    report = {
+        "schemaVersion": 1,
+        "diagnostic": "dependency-license-text-preflight",
+        "audit": "FAIL" if missing else "PASS",
+        "reason": "resolved dependencies lack native license/notice text" if missing else None,
+        "target": TARGET_TRIPLE,
+        "resolvedPackageCount": len(resolved),
+        "missingLicenseTextCount": len(missing),
+        "missingLicenseTexts": missing,
+    }
+    require(
+        len(json.dumps(report, ensure_ascii=True, sort_keys=True).encode("ascii"))
+        <= MAX_PREFLIGHT_OUTPUT_BYTES,
+        "license preflight diagnostic exceeds output limit",
+    )
+    return report
 
 
 def collect_dependency_licenses(
@@ -282,56 +424,9 @@ def collect_dependency_licenses(
     inventory: list[dict[str, object]] = []
     for package_id in sorted(resolved):
         require(package_id in by_id, f"resolved cargo package missing metadata: {package_id}")
-        package = by_id[package_id]
-        name = package.get("name")
-        version = package.get("version")
-        source = package.get("source")
-        manifest_path = package.get("manifest_path")
-        license_expression = package.get("license")
-        license_file = package.get("license_file")
-        require(
-            isinstance(name, str) and isinstance(version, str)
-            and (source is None or isinstance(source, str))
-            and isinstance(manifest_path, str),
-            "invalid cargo package provenance",
-        )
-        key = (name, version, source)
-        require(key in lock, f"cargo metadata package is not locked: {name} {version}")
-        if source is None:
-            require(name == "shirushi-desktop", f"unexpected unlocked path dependency: {name}")
-        else:
-            require(source.startswith("registry+"), f"unsupported cargo dependency source: {name}")
-        require(
-            (isinstance(license_expression, str) and license_expression.strip() != "")
-            or isinstance(license_file, str),
-            f"dependency has no declared license: {name} {version}",
-        )
-        if isinstance(license_expression, str):
-            require(
-                license_expression.strip().casefold()
-                not in {"unknown", "none", "proprietary", "unlicensed"},
-                f"dependency has unknown license: {name} {version}",
-            )
-        package_root = Path(manifest_path).resolve(strict=True).parent
-        require(package_root.is_dir() and not _linked(package_root), f"invalid package root: {name}")
-        candidates: dict[str, Path] = {}
-        if isinstance(license_file, str):
-            declared = Path(license_file)
-            if not declared.is_absolute():
-                declared = package_root / declared
-            declared = declared.resolve(strict=True)
-            require(declared.is_relative_to(package_root), f"license-file escapes package: {name}")
-            require(declared.is_file() and not _linked(declared), f"invalid license-file: {name}")
-            _require_unlinked_chain(package_root, declared, f"license-file: {name}")
-            candidates[declared.name] = declared
-        for child in package_root.iterdir():
-            if child.is_file() and LICENSE_NAMES.fullmatch(child.name):
-                require(not _linked(child), f"linked license text: {name}/{child.name}")
-                candidates.setdefault(child.name, child)
-        if name == "shirushi-desktop":
-            project_license = (source_root / "LICENSE").resolve(strict=True)
-            require(project_license.is_relative_to(source_root.resolve(strict=True)), "project license escape")
-            candidates.setdefault("LICENSE", project_license)
+        identity, candidates = _dependency_license_context(source_root, by_id[package_id], lock)
+        name = identity["name"]
+        version = identity["version"]
         require(candidates, f"no license/notice text found: {name} {version}")
         materials: list[dict[str, str]] = []
         for file_name, path in sorted(candidates.items(), key=lambda item: item[0].casefold()):
@@ -348,18 +443,8 @@ def collect_dependency_licenses(
                 "artifactPath": artifact_path,
                 "sha256": digest,
             })
-        locked = lock[key]
-        lock_checksum = locked.get("checksum")
-        require(
-            source is None or (isinstance(lock_checksum, str) and HEX_SHA256.fullmatch(lock_checksum)),
-            f"locked registry checksum missing or invalid: {name} {version}",
-        )
         inventory.append({
-            "name": name,
-            "version": version,
-            "sourceId": source,
-            "lockChecksum": lock_checksum,
-            "licenseExpression": license_expression,
+            **identity,
             "materials": materials,
         })
     inventory.sort(key=lambda item: (item["name"], item["version"], item["sourceId"] or ""))
@@ -704,6 +789,9 @@ def main() -> int:
     create.add_argument("--tested-sha", required=True)
     create.add_argument("--head-sha", required=True)
     create.add_argument("--base-sha")
+    preflight = subparsers.add_parser("preflight-licenses")
+    preflight.add_argument("--source-root", type=Path, required=True)
+    preflight.add_argument("--cargo-metadata", type=Path, required=True)
     audit = subparsers.add_parser("audit")
     audit.add_argument("--package-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -715,13 +803,35 @@ def main() -> int:
                 repository=args.repository, event_name=args.event_name,
                 tested_sha=args.tested_sha, head_sha=args.head_sha, base_sha=args.base_sha,
             )
-        else:
+        elif args.command == "audit":
             result = audit_package(args.package_dir)
+        else:
+            result = preflight_dependency_licenses(args.source_root, args.cargo_metadata)
     except (ValueError, OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        if args.command == "preflight-licenses":
+            if isinstance(error, tomllib.TOMLDecodeError):
+                reason = "invalid Cargo.lock"
+            elif isinstance(error, OSError):
+                reason = "dependency provenance input could not be read"
+            else:
+                reason = str(error)
+            if len(reason) > 512 or any(pattern.search(reason) for pattern in PERSONAL_PATH_PATTERNS):
+                reason = "malformed dependency metadata or lock provenance"
+            print(json.dumps({
+                "schemaVersion": 1,
+                "diagnostic": "dependency-license-text-preflight",
+                "audit": "ERROR",
+                "reason": reason,
+                "target": TARGET_TRIPLE,
+                "resolvedPackageCount": None,
+                "missingLicenseTextCount": 0,
+                "missingLicenseTexts": [],
+            }, ensure_ascii=True, sort_keys=True))
+            return 2
         print(json.dumps({"audit": "FAIL", "reason": str(error)}, sort_keys=True))
         return 1
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
-    return 0
+    return 1 if args.command == "preflight-licenses" and result["audit"] == "FAIL" else 0
 
 
 if __name__ == "__main__":

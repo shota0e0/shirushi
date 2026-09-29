@@ -139,6 +139,24 @@ jobs:
           cargo fetch --locked --manifest-path desktop\Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Record locked Windows dependency metadata
+        id: canary_metadata
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          if (Test-Path -LiteralPath $metadataPath) { throw "Cargo metadata output is not fresh" }
+          $metadata = cargo metadata --locked --offline --features manual-canary --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [IO.File]::WriteAllText($metadataPath, ($metadata -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+
+      - name: Preflight resolved dependency license texts
+        id: canary_license_preflight
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          .\.venv-py312\Scripts\python.exe scripts\package_f2c6_canary.py preflight-licenses --source-root $PWD.Path --cargo-metadata $metadataPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test native bridge offline
         id: cargo_test
         shell: pwsh
@@ -193,16 +211,6 @@ jobs:
         run: |
           .\.venv-py312\Scripts\python.exe scripts\verify_f2c1_ci.py --staged
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Record locked Windows dependency metadata
-        id: canary_metadata
-        shell: pwsh
-        run: |
-          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
-          if (Test-Path -LiteralPath $metadataPath) { throw "Cargo metadata output is not fresh" }
-          $metadata = cargo metadata --locked --offline --features manual-canary --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path desktop\Cargo.toml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [IO.File]::WriteAllText($metadataPath, ($metadata -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 
       - name: Create audited DEVELOPMENT CANARY package
         id: package_canary
@@ -294,6 +302,8 @@ jobs:
             "| DEVELOPMENT CANARY launcher tests | ${{ steps.canary_launcher_tests.outcome }} |",
             "| Web verification | ${{ steps.web_tests.outcome }} |",
             "| Cargo fetch | ${{ steps.cargo_fetch.outcome }} |",
+            "| Locked Windows dependency metadata | ${{ steps.canary_metadata.outcome }} |",
+            "| Dependency license-text preflight | ${{ steps.canary_license_preflight.outcome }} |",
             "| Cargo test | ${{ steps.cargo_test.outcome }} |",
             "| Cargo debug build | ${{ steps.cargo_build.outcome }} |",
             "| Post-build staged-asset audit | ${{ steps.post_audit.outcome }} |",
@@ -301,7 +311,6 @@ jobs:
             "| Manual-canary feature test (isolated target) | ${{ steps.canary_cargo_test.outcome }} |",
             "| Manual-canary feature build (isolated target) | ${{ steps.canary_cargo_build.outcome }} |",
             "| Manual-canary staged-asset re-audit | ${{ steps.canary_post_audit.outcome }} |",
-            "| Locked Windows dependency metadata | ${{ steps.canary_metadata.outcome }} |",
             "| DEVELOPMENT CANARY package creation | ${{ steps.package_canary.outcome }} |",
             "| DEVELOPMENT CANARY independent package audit | ${{ steps.audit_canary.outcome }} |",
             "| DEVELOPMENT CANARY artifact upload | ${{ steps.upload_canary.outcome }} |",

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
 import struct
+import sys
 import tomllib
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 import uuid
 
@@ -177,6 +180,119 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self.assertEqual(PACKAGE.NIKI_FIXTURE, json.loads((
             output / "demo-profile/Shirushi/personal-mark/personal-mark-v2.json"
         ).read_text(encoding="utf-8")))
+
+    def test_license_preflight_normal_pass_and_workflow_order(self):
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual({
+            "schemaVersion", "diagnostic", "audit", "reason", "target",
+            "resolvedPackageCount", "missingLicenseTextCount", "missingLicenseTexts",
+        }, set(report))
+        self.assertEqual("PASS", report["audit"])
+        self.assertEqual(2, report["resolvedPackageCount"])
+        self.assertEqual(0, report["missingLicenseTextCount"])
+        self.assertEqual([], report["missingLicenseTexts"])
+
+        workflow = (PROJECT / ".github/workflows/f2c1-windows-verification.yml").read_text(
+            encoding="utf-8"
+        )
+        fetch = workflow.index("id: cargo_fetch")
+        metadata = workflow.index("id: canary_metadata")
+        preflight = workflow.index("id: canary_license_preflight")
+        native_test = workflow.index("id: cargo_test")
+        self.assertLess(fetch, metadata)
+        self.assertLess(metadata, preflight)
+        self.assertLess(preflight, native_test)
+        self.assertEqual(1, workflow.count("preflight-licenses"))
+
+    def test_license_preflight_reports_all_missing_sorted_and_cli_fails_once(self):
+        (self.registry / "LICENSE-MIT").unlink()
+        second_root = self.case / "registry" / "alpha-dependency-2.0.0"
+        second_root.mkdir()
+        self.write(second_root, "Cargo.toml", "[package]\nname='alpha-dependency'\nversion='2.0.0'\n")
+        lock_text = (self.source / "desktop/Cargo.lock").read_text(encoding="utf-8")
+        lock_text += """
+[[package]]
+name = "alpha-dependency"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"""
+        (self.source / "desktop/Cargo.lock").write_text(lock_text, encoding="utf-8")
+        metadata = json.loads(self.metadata.read_text(encoding="utf-8"))
+        second_id = (
+            "registry+https://github.com/rust-lang/crates.io-index"
+            "#alpha-dependency@2.0.0"
+        )
+        metadata["packages"].append({
+            "id": second_id,
+            "name": "alpha-dependency",
+            "version": "2.0.0",
+            "source": PACKAGE.CRATES_IO_SOURCE,
+            "manifest_path": str((second_root / "Cargo.toml").resolve()),
+            "license": "Apache-2.0 OR MIT",
+            "license_file": None,
+        })
+        metadata["resolve"]["nodes"][0]["deps"].append({"pkg": second_id})
+        metadata["resolve"]["nodes"].append({"id": second_id, "deps": []})
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+
+        report = PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+        self.assertEqual("FAIL", report["audit"])
+        self.assertEqual(2, report["missingLicenseTextCount"])
+        self.assertEqual(
+            ["alpha-dependency", "fake-dependency"],
+            [item["name"] for item in report["missingLicenseTexts"]],
+        )
+        self.assertEqual(
+            {"name", "version", "sourceId", "lockChecksum", "licenseExpression"},
+            set(report["missingLicenseTexts"][0]),
+        )
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(self.case), serialized)
+        self.assertLessEqual(len(serialized.encode("ascii")), PACKAGE.MAX_PREFLIGHT_OUTPUT_BYTES)
+
+        output = io.StringIO()
+        argv = [
+            "package_f2c6_canary.py", "preflight-licenses",
+            "--source-root", str(self.source),
+            "--cargo-metadata", str(self.metadata),
+        ]
+        with mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(1, PACKAGE.main())
+        lines = output.getvalue().splitlines()
+        self.assertEqual(1, len(lines))
+        self.assertEqual(report, json.loads(lines[0]))
+
+    def test_license_preflight_missing_declaration_and_malformed_metadata_error(self):
+        metadata = json.loads(self.metadata.read_text(encoding="utf-8"))
+        metadata["packages"][1]["license"] = None
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "no declared license: fake-dependency 1.0.0"):
+            PACKAGE.preflight_dependency_licenses(self.source, self.metadata)
+
+        self.metadata.write_text('{"packages": "not-a-list"}', encoding="utf-8")
+        output = io.StringIO()
+        argv = [
+            "package_f2c6_canary.py", "preflight-licenses",
+            "--source-root", str(self.source),
+            "--cargo-metadata", str(self.metadata),
+        ]
+        with mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(2, PACKAGE.main())
+        report = json.loads(output.getvalue())
+        self.assertEqual("ERROR", report["audit"])
+        self.assertEqual(0, report["missingLicenseTextCount"])
+        self.assertEqual([], report["missingLicenseTexts"])
+        self.assertNotIn(str(self.case), output.getvalue())
+
+        self.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+        (self.source / "desktop/Cargo.lock").write_text("not valid TOML =", encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(2, PACKAGE.main())
+        report = json.loads(output.getvalue())
+        self.assertEqual("ERROR", report["audit"])
+        self.assertEqual("invalid Cargo.lock", report["reason"])
 
     def test_missing_extra_tamper_and_extra_executable_fail(self):
         original = self.create()
