@@ -16,6 +16,13 @@ build/
 dist/
 *.egg-info/
 
+# Desktop build output and local test runtime (not publication inputs)
+desktop/target/
+desktop/.generated/
+desktop/gen/
+tests/.runtime/
+tests/.personal_mark_runtime/
+
 # Local configuration and secret material
 .env
 .env.*

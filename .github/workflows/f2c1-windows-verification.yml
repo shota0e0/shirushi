@@ -1,0 +1,363 @@
+name: F2C.1 Windows verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f2c1-windows-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Frozen F2C.1 source verification
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+    steps:
+      - name: Check out exact source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12.10 x64
+        id: python_setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+          architecture: x64
+
+      - name: Set up Node 24.18.0
+        id: node_setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Install pinned Rust toolchain
+        id: rust_setup
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $targets = rustup target list --toolchain $env:RUSTUP_TOOLCHAIN --installed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (@($targets) -notcontains "x86_64-pc-windows-msvc") { throw "Pinned MSVC target is not installed" }
+          $targets
+
+      - name: Assert and record tool versions
+        id: versions
+        shell: pwsh
+        run: |
+          $pythonVersion = python -c "import platform; print(platform.python_version())"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($pythonVersion -ne "3.12.10") { throw "Unexpected Python version: $pythonVersion" }
+          $pythonBits = python -c "import struct; print(struct.calcsize('P') * 8)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($pythonBits -ne "64") { throw "Python is not x64" }
+          $nodeVersion = node --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($nodeVersion -ne "v24.18.0") { throw "Unexpected Node version: $nodeVersion" }
+          $nodeArch = node -p "process.arch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($nodeArch -ne "x64") { throw "Node is not x64" }
+          $rustVersion = rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $rustVersion.StartsWith("rustc 1.97.1 ")) { throw "Unexpected rustc version: $rustVersion" }
+          $cargoVersion = cargo --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $cargoVersion.StartsWith("cargo 1.97.1 ")) { throw "Unexpected cargo version: $cargoVersion" }
+          "Python: $pythonVersion ($pythonBits-bit)"
+          "Node: $nodeVersion ($nodeArch)"
+          "Rust: $rustVersion"
+          "Cargo: $cargoVersion"
+
+      - name: Create fixed Python virtual environment
+        id: venv
+        shell: pwsh
+        run: |
+          python -m venv .venv-py312
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-py312\Scripts\python.exe -c "import platform; assert platform.python_version() == '3.12.10'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit source and resources before build
+        id: pre_audit
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\verify_f2c1_ci.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run bounded Python bridge and Personal Mark suites
+        id: python_tests
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe -m unittest -q tests.test_desktop_bridge tests.test_personal_mark tests.test_personal_mark_motion tests.test_personal_mark_v2 tests.test_personal_mark_v2_store tests.test_personal_mark_snapshot tests.test_personal_mark_unicode16 tests.test_personal_mark_v2_cross_language
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run CI verification and public asset governance tests
+        id: ci_audit_tests
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe -m unittest -q tests.test_f2c1_ci_verification tests.test_public_fixture_governance tests.test_f2c6_canary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run DEVELOPMENT CANARY launcher tests
+        id: canary_launcher_tests
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests\test_f2c6_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run all Web verification commands
+        id: web_tests
+        shell: pwsh
+        run: |
+          node web\verify.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node web\desktop\verify.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node web\personal-mark-v2\verify.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node web\personal-mark-v2\unicode16.verify.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node web-canary\verify.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Fetch locked Rust dependencies
+        id: cargo_fetch
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record locked Windows dependency metadata
+        id: canary_metadata
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          if (Test-Path -LiteralPath $metadataPath) { throw "Cargo metadata output is not fresh" }
+          $metadata = cargo metadata --locked --offline --features manual-canary --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [IO.File]::WriteAllText($metadataPath, ($metadata -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+
+      - name: Preflight resolved dependency license texts
+        id: canary_license_preflight
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          .\.venv-py312\Scripts\python.exe scripts\package_f2c6_canary.py preflight-licenses --source-root $PWD.Path --cargo-metadata $metadataPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test native bridge offline
+        id: cargo_test
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build debug desktop executable offline without launching
+        id: cargo_build
+        shell: pwsh
+        run: |
+          cargo build --locked --offline --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit staged assets after build
+        id: post_audit
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\verify_f2c1_ci.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify debug executable exists without launching it
+        id: exe_exists
+        shell: pwsh
+        run: |
+          $item = Get-Item -LiteralPath desktop\target\debug\shirushi-desktop.exe -ErrorAction Stop
+          if (-not $item.PSIsContainer -and $item.Length -gt 0) { "Verified file: $($item.FullName) ($($item.Length) bytes)" } else { throw "Debug executable is missing or invalid" }
+
+      - name: Test debug-only manual canary feature offline in isolated target
+        id: canary_cargo_test
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          if (Test-Path -LiteralPath $env:CARGO_TARGET_DIR) { throw "Canary target directory is not fresh" }
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test native DEVELOPMENT CANARY runner offline
+        id: canary_runner_tests
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo test --locked --offline --features manual-canary --bin shirushi-canary-runner --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build debug-only manual canary executable offline without launching
+        id: canary_cargo_build
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo build --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $item = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-desktop.exe") -ErrorAction Stop
+          if ($item.PSIsContainer -or $item.Length -le 0) { throw "Manual canary executable is missing or invalid" }
+          "Verified feature executable without launching: $($item.FullName) ($($item.Length) bytes)"
+
+      - name: Build native DEVELOPMENT CANARY runner offline
+        id: canary_runner_build
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo build --locked --offline --features manual-canary --bin shirushi-canary-runner --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $item = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-canary-runner.exe") -ErrorAction Stop
+          if ($item.PSIsContainer -or $item.Length -le 0) { throw "Native runner executable is missing or invalid" }
+          "Verified DEVELOPMENT CANARY runner without launching: $($item.FullName) ($($item.Length) bytes)"
+
+      - name: Re-audit generated assets after manual canary build
+        id: canary_post_audit
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\verify_f2c1_ci.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create audited DEVELOPMENT CANARY package
+        id: package_canary
+        env:
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+          EVIDENCE_EVENT: ${{ github.event_name }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        shell: pwsh
+        run: |
+          $targetDir = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          $artifactDir = Join-Path $env:RUNNER_TEMP "shirushi-DEVELOPMENT-CANARY-windows-x64-$env:EVIDENCE_SHA"
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          $rustSysroot = rustc --print sysroot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustLibraryNotice = Join-Path $rustSysroot "share\doc\rust\COPYRIGHT-library.html"
+          $noticeItem = Get-Item -LiteralPath $rustLibraryNotice -ErrorAction Stop
+          if ($noticeItem.PSIsContainer -or $noticeItem.Length -le 0) { throw "Rust library notice is missing or invalid" }
+          $arguments = @(
+            "scripts\package_f2c6_canary.py", "create",
+            "--source-root", $PWD.Path,
+            "--executable", (Join-Path $targetDir "debug\shirushi-desktop.exe"),
+            "--runner-executable", (Join-Path $targetDir "debug\shirushi-canary-runner.exe"),
+            "--output", $artifactDir,
+            "--cargo-metadata", $metadataPath,
+            "--rust-library-notice", $rustLibraryNotice,
+            "--repository", $env:EVIDENCE_REPOSITORY,
+            "--event-name", $env:EVIDENCE_EVENT,
+            "--tested-sha", $env:EVIDENCE_SHA,
+            "--head-sha", $env:EVIDENCE_HEAD_SHA
+          )
+          if ($env:EVIDENCE_BASE_SHA) { $arguments += @("--base-sha", $env:EVIDENCE_BASE_SHA) }
+          & .\.venv-py312\Scripts\python.exe @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "artifact_dir=$artifactDir" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $manifestHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "manifest.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "shirushi-desktop.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runnerHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "shirushi-canary-runner.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          "DEVELOPMENT CANARY manifest SHA-256: $manifestHash"
+          "DEVELOPMENT CANARY executable SHA-256: $exeHash"
+          "DEVELOPMENT CANARY runner SHA-256: $runnerHash"
+
+      - name: Independently re-audit DEVELOPMENT CANARY package
+        id: audit_canary
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\package_f2c6_canary.py audit --package-dir "${{ steps.package_canary.outputs.artifact_dir }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compare PowerShell reference and native runner Prepare boundaries
+        id: canary_equivalence
+        shell: pwsh
+        run: |
+          $python = (Get-Command python -ErrorAction Stop).Source
+          pwsh -NoProfile -File tests\test_f2c7_equivalence.ps1 -PackageDir "${{ steps.package_canary.outputs.artifact_dir }}" -PythonPath $python
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload DEVELOPMENT CANARY package
+        id: upload_canary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: shirushi-DEVELOPMENT-CANARY-windows-x64-${{ github.sha }}
+          path: ${{ steps.package_canary.outputs.artifact_dir }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Record CI-only evidence and unresolved gates
+        if: always()
+        env:
+          EVIDENCE_EVENT: ${{ github.event_name }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVIDENCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVIDENCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: pwsh
+        run: |
+          $summary = @(
+            "# F2C.1 Windows verification",
+            "",
+            "Event: $env:EVIDENCE_EVENT",
+            "Tested SHA (PR merge SHA for pull_request): $env:EVIDENCE_SHA",
+            "PR head SHA: $env:EVIDENCE_HEAD_SHA",
+            "PR base SHA: $env:EVIDENCE_BASE_SHA",
+            "Run: $env:EVIDENCE_RUN_URL",
+            "",
+            "| Step | Outcome |",
+            "| --- | --- |",
+            "| Checkout | ${{ steps.checkout.outcome }} |",
+            "| Python setup | ${{ steps.python_setup.outcome }} |",
+            "| Node setup | ${{ steps.node_setup.outcome }} |",
+            "| Rust toolchain setup | ${{ steps.rust_setup.outcome }} |",
+            "| Version assertions | ${{ steps.versions.outcome }} |",
+            "| Python venv | ${{ steps.venv.outcome }} |",
+            "| Pre-build source/resource audit | ${{ steps.pre_audit.outcome }} |",
+            "| Bounded Python suites | ${{ steps.python_tests.outcome }} |",
+            "| CI audit and public asset governance | ${{ steps.ci_audit_tests.outcome }} |",
+            "| DEVELOPMENT CANARY launcher tests | ${{ steps.canary_launcher_tests.outcome }} |",
+            "| Web verification | ${{ steps.web_tests.outcome }} |",
+            "| Cargo fetch | ${{ steps.cargo_fetch.outcome }} |",
+            "| Locked Windows dependency metadata | ${{ steps.canary_metadata.outcome }} |",
+            "| Dependency license-text preflight | ${{ steps.canary_license_preflight.outcome }} |",
+            "| Cargo test | ${{ steps.cargo_test.outcome }} |",
+            "| Cargo debug build | ${{ steps.cargo_build.outcome }} |",
+            "| Post-build staged-asset audit | ${{ steps.post_audit.outcome }} |",
+            "| Debug executable existence only | ${{ steps.exe_exists.outcome }} |",
+            "| Manual-canary feature test (isolated target) | ${{ steps.canary_cargo_test.outcome }} |",
+            "| Native runner tests | ${{ steps.canary_runner_tests.outcome }} |",
+            "| Manual-canary feature build (isolated target) | ${{ steps.canary_cargo_build.outcome }} |",
+            "| Native runner build | ${{ steps.canary_runner_build.outcome }} |",
+            "| Manual-canary staged-asset re-audit | ${{ steps.canary_post_audit.outcome }} |",
+            "| DEVELOPMENT CANARY package creation | ${{ steps.package_canary.outcome }} |",
+            "| DEVELOPMENT CANARY independent package audit | ${{ steps.audit_canary.outcome }} |",
+            "| PowerShell/native Prepare equivalence | ${{ steps.canary_equivalence.outcome }} |",
+            "| DEVELOPMENT CANARY artifact upload | ${{ steps.upload_canary.outcome }} |",
+            "",
+            "DEVELOPMENT CANARY artifact ID: ${{ steps.upload_canary.outputs.artifact-id }}",
+            "DEVELOPMENT CANARY artifact digest: ${{ steps.upload_canary.outputs.artifact-digest }}",
+            "DEVELOPMENT CANARY artifact URL: ${{ steps.upload_canary.outputs.artifact-url }}",
+            "Retention: 7 days. This unsigned debug package is not an installer or release.",
+            "",
+            "This is CI-only evidence. A skipped or failed step is not a PASS.",
+            "Legacy Tk integration: **2 EXCLUDED / PENDING**; exact IDs and internal verification command are in docs/development/f2c-verification.md.",
+            "The 13 motion-domain tests remain included. This bounded public-source suite is not full legacy Python regression.",
+            "Full Python regression: **NOT RUN by this workflow**.",
+            "All local native build, test, launch, UI, and sidecar lifecycle evidence: **PENDING**.",
+            "G2: **NOT READY**, even if every CI step succeeds."
+          )
+          $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
