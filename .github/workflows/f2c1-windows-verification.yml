@@ -107,7 +107,14 @@ jobs:
         id: ci_audit_tests
         shell: pwsh
         run: |
-          .\.venv-py312\Scripts\python.exe -m unittest -q tests.test_f2c1_ci_verification tests.test_public_fixture_governance
+          .\.venv-py312\Scripts\python.exe -m unittest -q tests.test_f2c1_ci_verification tests.test_public_fixture_governance tests.test_f2c6_canary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run DEVELOPMENT CANARY launcher tests
+        id: canary_launcher_tests
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests\test_f2c6_launcher.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run all Web verification commands
@@ -160,6 +167,100 @@ jobs:
           $item = Get-Item -LiteralPath desktop\target\debug\shirushi-desktop.exe -ErrorAction Stop
           if (-not $item.PSIsContainer -and $item.Length -gt 0) { "Verified file: $($item.FullName) ($($item.Length) bytes)" } else { throw "Debug executable is missing or invalid" }
 
+      - name: Test debug-only manual canary feature offline in isolated target
+        id: canary_cargo_test
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          if (Test-Path -LiteralPath $env:CARGO_TARGET_DIR) { throw "Canary target directory is not fresh" }
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build debug-only manual canary executable offline without launching
+        id: canary_cargo_build
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          cargo build --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $item = Get-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-desktop.exe") -ErrorAction Stop
+          if ($item.PSIsContainer -or $item.Length -le 0) { throw "Manual canary executable is missing or invalid" }
+          "Verified feature executable without launching: $($item.FullName) ($($item.Length) bytes)"
+
+      - name: Re-audit generated assets after manual canary build
+        id: canary_post_audit
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\verify_f2c1_ci.py --staged
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record locked Windows dependency metadata
+        id: canary_metadata
+        shell: pwsh
+        run: |
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          if (Test-Path -LiteralPath $metadataPath) { throw "Cargo metadata output is not fresh" }
+          $metadata = cargo metadata --locked --offline --features manual-canary --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [IO.File]::WriteAllText($metadataPath, ($metadata -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+
+      - name: Create audited DEVELOPMENT CANARY package
+        id: package_canary
+        env:
+          EVIDENCE_REPOSITORY: ${{ github.repository }}
+          EVIDENCE_EVENT: ${{ github.event_name }}
+          EVIDENCE_SHA: ${{ github.sha }}
+          EVIDENCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVIDENCE_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        shell: pwsh
+        run: |
+          $targetDir = Join-Path $env:RUNNER_TEMP "f2c6-canary-target"
+          $artifactDir = Join-Path $env:RUNNER_TEMP "shirushi-DEVELOPMENT-CANARY-windows-x64-$env:EVIDENCE_SHA"
+          $metadataPath = Join-Path $env:RUNNER_TEMP "f2c6-cargo-metadata.json"
+          $rustSysroot = rustc --print sysroot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustLibraryNotice = Join-Path $rustSysroot "share\doc\rust\COPYRIGHT-library.html"
+          $noticeItem = Get-Item -LiteralPath $rustLibraryNotice -ErrorAction Stop
+          if ($noticeItem.PSIsContainer -or $noticeItem.Length -le 0) { throw "Rust library notice is missing or invalid" }
+          $arguments = @(
+            "scripts\package_f2c6_canary.py", "create",
+            "--source-root", $PWD.Path,
+            "--executable", (Join-Path $targetDir "debug\shirushi-desktop.exe"),
+            "--output", $artifactDir,
+            "--cargo-metadata", $metadataPath,
+            "--rust-library-notice", $rustLibraryNotice,
+            "--repository", $env:EVIDENCE_REPOSITORY,
+            "--event-name", $env:EVIDENCE_EVENT,
+            "--tested-sha", $env:EVIDENCE_SHA,
+            "--head-sha", $env:EVIDENCE_HEAD_SHA
+          )
+          if ($env:EVIDENCE_BASE_SHA) { $arguments += @("--base-sha", $env:EVIDENCE_BASE_SHA) }
+          & .\.venv-py312\Scripts\python.exe @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "artifact_dir=$artifactDir" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $manifestHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "manifest.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeHash = (Get-FileHash -LiteralPath (Join-Path $artifactDir "shirushi-desktop.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          "DEVELOPMENT CANARY manifest SHA-256: $manifestHash"
+          "DEVELOPMENT CANARY executable SHA-256: $exeHash"
+
+      - name: Independently re-audit DEVELOPMENT CANARY package
+        id: audit_canary
+        shell: pwsh
+        run: |
+          .\.venv-py312\Scripts\python.exe scripts\package_f2c6_canary.py audit --package-dir "${{ steps.package_canary.outputs.artifact_dir }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload DEVELOPMENT CANARY package
+        id: upload_canary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: shirushi-DEVELOPMENT-CANARY-windows-x64-${{ github.sha }}
+          path: ${{ steps.package_canary.outputs.artifact_dir }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+          include-hidden-files: false
+
       - name: Record CI-only evidence and unresolved gates
         if: always()
         env:
@@ -190,12 +291,25 @@ jobs:
             "| Pre-build source/resource audit | ${{ steps.pre_audit.outcome }} |",
             "| Bounded Python suites | ${{ steps.python_tests.outcome }} |",
             "| CI audit and public asset governance | ${{ steps.ci_audit_tests.outcome }} |",
+            "| DEVELOPMENT CANARY launcher tests | ${{ steps.canary_launcher_tests.outcome }} |",
             "| Web verification | ${{ steps.web_tests.outcome }} |",
             "| Cargo fetch | ${{ steps.cargo_fetch.outcome }} |",
             "| Cargo test | ${{ steps.cargo_test.outcome }} |",
             "| Cargo debug build | ${{ steps.cargo_build.outcome }} |",
             "| Post-build staged-asset audit | ${{ steps.post_audit.outcome }} |",
             "| Debug executable existence only | ${{ steps.exe_exists.outcome }} |",
+            "| Manual-canary feature test (isolated target) | ${{ steps.canary_cargo_test.outcome }} |",
+            "| Manual-canary feature build (isolated target) | ${{ steps.canary_cargo_build.outcome }} |",
+            "| Manual-canary staged-asset re-audit | ${{ steps.canary_post_audit.outcome }} |",
+            "| Locked Windows dependency metadata | ${{ steps.canary_metadata.outcome }} |",
+            "| DEVELOPMENT CANARY package creation | ${{ steps.package_canary.outcome }} |",
+            "| DEVELOPMENT CANARY independent package audit | ${{ steps.audit_canary.outcome }} |",
+            "| DEVELOPMENT CANARY artifact upload | ${{ steps.upload_canary.outcome }} |",
+            "",
+            "DEVELOPMENT CANARY artifact ID: ${{ steps.upload_canary.outputs.artifact-id }}",
+            "DEVELOPMENT CANARY artifact digest: ${{ steps.upload_canary.outputs.artifact-digest }}",
+            "DEVELOPMENT CANARY artifact URL: ${{ steps.upload_canary.outputs.artifact-url }}",
+            "Retention: 7 days. This unsigned debug package is not an installer or release.",
             "",
             "This is CI-only evidence. A skipped or failed step is not a PASS.",
             "Legacy Tk integration: **2 EXCLUDED / PENDING**; exact IDs and internal verification command are in docs/development/f2c-verification.md.",

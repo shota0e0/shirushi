@@ -1,3 +1,6 @@
+#[cfg(all(feature = "manual-canary", not(debug_assertions)))]
+compile_error!("the manual-canary feature is DEVELOPMENT CANARY only and must not be built without debug assertions");
+
 #[cfg(test)]
 mod asset_stage;
 mod host;
@@ -63,11 +66,33 @@ async fn bridge_load_personal_mark(state: tauri::State<'_, BridgeRuntime>) -> Re
 }
 
 pub fn run() {
+    let webview_data_directory = match host::prepare_process_environment() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Shirushi DEVELOPMENT CANARY preparation failed: {}", error.code);
+            #[cfg(feature = "manual-canary")]
+            std::process::exit(2);
+            #[cfg(not(feature = "manual-canary"))]
+            return;
+        }
+    };
     let runtime = BridgeRuntime::start();
     tauri::Builder::default()
         .manage(runtime)
-        .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .setup(move |app| {
+            let window = WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()));
+            #[cfg(feature = "manual-canary")]
+            let window = window.data_directory(
+                webview_data_directory
+                    .clone()
+                    .expect("manual canary WebView data directory was not prepared"),
+            );
+            #[cfg(not(feature = "manual-canary"))]
+            let window = {
+                let _ = &webview_data_directory;
+                window
+            };
+            window
                 .title("Shirushi")
                 .inner_size(980.0, 760.0)
                 .min_inner_size(720.0, 600.0)

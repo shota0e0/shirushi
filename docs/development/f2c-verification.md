@@ -1,6 +1,38 @@
 # F2C verification and clean public export
 
-## Scope and status
+## F2C.6 development-canary boundary
+
+The materialization ledger below records the historical F2C.4 review, not the
+current publication or CI state. F2C.5 created four exact commits on
+`codex/f2c-public-export`, opened [PR #1](https://github.com/shota0e0/shirushi/pull/1),
+and completed [Windows verification run 36537296595](https://github.com/shota0e0/shirushi/actions/runs/36537296595).
+The PR remains unmerged; that CI success did not approve G2.
+
+F2C.6 adds only an unsigned **DEVELOPMENT CANARY** artifact for Owner manual
+review. It is not a release, installer, production package, or signed build.
+The explicit debug-only `manual-canary` feature uses the extracted package's
+fixed bridge resources and synthetic demo profile. The default repository-layout
+build and its checks are retained; no actual Add/Verify/C2PA capability is added.
+See the [canary launch and failure checklist](../../scripts/canary/README.md).
+
+The default and canary builds/tests, Web/Python checks, source/resource audits,
+artifact manifest/hash/privacy checks, and upload must succeed independently.
+Artifact availability is not evidence of an actual Desktop window, local Python
+sidecar, crash recovery, shutdown/process cleanup, or Application Control
+compatibility. All native manual checklist items remain **PENDING**, and G2
+remains **NOT READY / NOT APPROVED** until separately reviewed.
+Do not disable, bypass, or modify a security policy. A policy rejection is
+**LOCAL POLICY BLOCKED**, not automatically a product failure.
+
+Correction to the historical whitespace entries below: the Owner accepted
+exactly three frozen EOF blank lines in `web/personal-mark-v2/README.md:33`,
+`embedding.js:9`, and `errors.js:46`. The correct result is
+**KNOWN WHITESPACE EXCEPTIONS = 3 / Other errors = 0**; strict CRLF-aware
+`diff --check` returned exit 2, not PASS. F2C.6 does not rewrite these bytes.
+The two legacy Tk integration tests remain **EXCLUDED / PENDING**; the 13
+motion-domain tests remain included. The bounded CI is not full Python regression.
+
+## Historical F2C.4 scope and status
 
 This is a source-only, local-development foundation, not an integrated product
 release. The approved clean export starts from the public `shota0e0/shirushi`

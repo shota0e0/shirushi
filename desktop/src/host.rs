@@ -1,6 +1,11 @@
 use crate::protocol::{decode_response, encode_request, BridgeError, GET_CAPABILITIES, MAX_RESPONSE_BYTES};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use serde_json::Value;
+#[cfg(feature = "manual-canary")]
+use std::env;
+#[cfg(any(test, feature = "manual-canary"))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -34,13 +39,18 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(750);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
+#[cfg(feature = "manual-canary")]
+const CANARY_UNAVAILABLE_ENV: &str = "SHIRUSHI_CANARY_SIDECAR_UNAVAILABLE";
+#[cfg(feature = "manual-canary")]
+const LOCAL_APP_DATA_ENV: &str = "LOCALAPPDATA";
+#[cfg(feature = "manual-canary")]
+const CANARY_PROFILE: &str = "demo-profile";
 
 #[derive(Clone, Debug)]
 struct LaunchConfig {
     executable: PathBuf,
     arguments: Vec<String>,
-    #[cfg(test)]
-    environment: Vec<(String, String)>,
+    environment: Vec<(OsString, OsString)>,
 }
 
 impl LaunchConfig {
@@ -51,17 +61,51 @@ impl LaunchConfig {
                 "the repository-layout Python bridge is enabled only in local development builds",
             ));
         }
-        let manifest = fs::canonicalize(env!("CARGO_MANIFEST_DIR")).map_err(|_| {
-            BridgeError::new("BRIDGE_UNAVAILABLE", "could not resolve desktop manifest directory")
-        })?;
-        let repository = canonical_parent(&manifest)?;
-        let executable = canonical_fixed_file(&repository, Path::new(".venv-py312/Scripts/python.exe"))?;
-        let script = canonical_fixed_file(&repository, Path::new("scripts/shirushi_bridge.py"))?;
+
+        #[cfg(feature = "manual-canary")]
+        {
+            if sidecar_unavailable_requested() {
+                return Err(BridgeError::new(
+                    "BRIDGE_UNAVAILABLE",
+                    "the DEVELOPMENT CANARY sidecar-unavailable scenario was requested",
+                ));
+            }
+            let executable = env::current_exe().map_err(|_| {
+                BridgeError::new("BRIDGE_UNAVAILABLE", "could not resolve the canary executable")
+            })?;
+            let repository = package_root_from_executable(&executable)?;
+            let profile = validate_canary_profile(&repository)?;
+            return Self::for_repository(&repository, Some(profile), true);
+        }
+
+        #[cfg(not(feature = "manual-canary"))]
+        Self::for_repository(&default_repository_root()?, None, false)
+    }
+
+    fn for_repository(
+        repository: &Path,
+        local_app_data: Option<PathBuf>,
+        add_bytecode_flag: bool,
+    ) -> Result<Self, BridgeError> {
+        let resolve_file = if add_bytecode_flag {
+            canonical_fixed_file_strict
+        } else {
+            canonical_fixed_file
+        };
+        let executable = resolve_file(repository, Path::new(".venv-py312/Scripts/python.exe"))?;
+        let script = resolve_file(repository, Path::new("scripts/shirushi_bridge.py"))?;
+        let mut arguments = vec!["-I".into(), "-u".into(), script.to_string_lossy().into_owned()];
+        if add_bytecode_flag {
+            arguments.insert(2, "-B".into());
+        }
+        let mut environment = Vec::new();
+        if let Some(profile) = local_app_data {
+            environment.push((OsString::from("LOCALAPPDATA"), profile.into_os_string()));
+        }
         Ok(Self {
             executable,
-            arguments: vec!["-I".into(), "-u".into(), script.to_string_lossy().into_owned()],
-            #[cfg(test)]
-            environment: Vec::new(),
+            arguments,
+            environment,
         })
     }
 
@@ -92,13 +136,87 @@ impl LaunchConfig {
 
     #[cfg(test)]
     fn production_fixture(local_app_data: &Path) -> Result<Self, BridgeError> {
-        let mut config = Self::production()?;
+        let mut config = Self::for_repository(&default_repository_root()?, None, false)?;
         config.environment.push((
-            "LOCALAPPDATA".into(),
-            local_app_data.to_string_lossy().into_owned(),
+            OsString::from("LOCALAPPDATA"),
+            local_app_data.as_os_str().to_owned(),
         ));
         Ok(config)
     }
+}
+
+fn default_repository_root() -> Result<PathBuf, BridgeError> {
+    let manifest = fs::canonicalize(env!("CARGO_MANIFEST_DIR")).map_err(|_| {
+        BridgeError::new("BRIDGE_UNAVAILABLE", "could not resolve desktop manifest directory")
+    })?;
+    canonical_parent(&manifest)
+}
+
+pub(crate) fn prepare_process_environment() -> Result<Option<PathBuf>, BridgeError> {
+    #[cfg(feature = "manual-canary")]
+    {
+        // Clear the inherited value first: every failure path is isolated from the real profile.
+        env::remove_var(LOCAL_APP_DATA_ENV);
+        let executable = env::current_exe().map_err(|_| {
+            BridgeError::new("BRIDGE_UNAVAILABLE", "could not resolve the canary executable")
+        })?;
+        return prepare_manual_canary_environment(&executable).map(Some);
+    }
+
+    #[cfg(not(feature = "manual-canary"))]
+    Ok(None)
+}
+
+#[cfg(feature = "manual-canary")]
+fn prepare_manual_canary_environment(executable: &Path) -> Result<PathBuf, BridgeError> {
+    let repository = package_root_from_executable(executable)?;
+    let profile_candidate = repository.join(CANARY_PROFILE);
+    // Set the package-local value before checking it. Missing, linked, or malformed fixtures
+    // therefore cannot fall back to an inherited real profile before WebView initialization.
+    env::set_var(LOCAL_APP_DATA_ENV, &profile_candidate);
+    let profile = validate_canary_profile(&repository)?;
+    env::set_var(LOCAL_APP_DATA_ENV, &profile);
+    prepare_canary_webview_directory(&profile)
+}
+
+#[cfg(feature = "manual-canary")]
+fn sidecar_unavailable_requested() -> bool {
+    env::var_os(CANARY_UNAVAILABLE_ENV).as_deref() == Some(OsStr::new("1"))
+}
+
+#[cfg(feature = "manual-canary")]
+fn package_root_from_executable(executable: &Path) -> Result<PathBuf, BridgeError> {
+    let executable = fs::canonicalize(executable).map_err(|_| {
+        BridgeError::new("BRIDGE_UNAVAILABLE", "could not canonicalize the canary executable")
+    })?;
+    canonical_parent(&executable)
+}
+
+#[cfg(feature = "manual-canary")]
+fn validate_canary_profile(repository: &Path) -> Result<PathBuf, BridgeError> {
+    let profile = canonical_fixed_directory(repository, Path::new(CANARY_PROFILE))?;
+    canonical_fixed_directory(&profile, Path::new("Shirushi"))?;
+    canonical_fixed_directory(&profile, Path::new("Shirushi/personal-mark"))?;
+    canonical_fixed_file_strict(
+        &profile,
+        Path::new("Shirushi/personal-mark/personal-mark-v2.json"),
+    )?;
+    Ok(profile)
+}
+
+#[cfg(feature = "manual-canary")]
+fn prepare_canary_webview_directory(profile: &Path) -> Result<PathBuf, BridgeError> {
+    let relative = Path::new("Shirushi/canary-webview");
+    let candidate = profile.join(relative);
+    if !candidate.exists() {
+        fs::create_dir(&candidate).map_err(|_| {
+            BridgeError::new(
+                "BRIDGE_UNAVAILABLE",
+                "could not create the isolated canary WebView data directory",
+            )
+        })?;
+    }
+    canonical_fixed_directory(profile, relative)
 }
 
 fn canonical_parent(manifest: &Path) -> Result<PathBuf, BridgeError> {
@@ -124,6 +242,69 @@ fn canonical_fixed_file(repository: &Path, relative: &Path) -> Result<PathBuf, B
         ));
     }
     Ok(path)
+}
+
+fn canonical_fixed_file_strict(repository: &Path, relative: &Path) -> Result<PathBuf, BridgeError> {
+    reject_linked_components(repository, relative)?;
+    canonical_fixed_file(repository, relative)
+}
+
+fn canonical_fixed_directory(repository: &Path, relative: &Path) -> Result<PathBuf, BridgeError> {
+    reject_linked_components(repository, relative)?;
+    let path = fs::canonicalize(repository.join(relative)).map_err(|_| {
+        BridgeError::new(
+            "BRIDGE_UNAVAILABLE",
+            format!("required fixed directory is unavailable: {}", relative.display()),
+        )
+    })?;
+    if !path.starts_with(repository) || !path.is_dir() {
+        return Err(BridgeError::new(
+            "BRIDGE_UNAVAILABLE",
+            "fixed directory resolved outside the package root or is not a directory",
+        ));
+    }
+    Ok(path)
+}
+
+fn reject_linked_components(repository: &Path, relative: &Path) -> Result<(), BridgeError> {
+    let mut candidate = repository.to_path_buf();
+    for component in relative.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(part) => candidate.push(part),
+            _ => {
+                return Err(BridgeError::new(
+                    "BRIDGE_UNAVAILABLE",
+                    "fixed component path is not package-relative",
+                ));
+            }
+        }
+        let metadata = fs::symlink_metadata(&candidate).map_err(|_| {
+            BridgeError::new(
+                "BRIDGE_UNAVAILABLE",
+                format!("required fixed component is unavailable: {}", relative.display()),
+            )
+        })?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(BridgeError::new(
+                "BRIDGE_UNAVAILABLE",
+                "linked or reparse-point package components are not allowed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 #[derive(Debug)]
@@ -459,7 +640,6 @@ fn spawn_child(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(test)]
     for (name, value) in &config.environment {
         command.env(name, value);
     }
@@ -798,6 +978,37 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(feature = "manual-canary")]
+    static ENVIRONMENT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn unique_test_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("{label}-{nonce}"))
+    }
+
+    #[cfg(feature = "manual-canary")]
+    fn create_canary_layout(label: &str, include_profile: bool) -> (PathBuf, PathBuf) {
+        let root = unique_test_directory(label);
+        fs::create_dir_all(root.join(".venv-py312/Scripts")).unwrap();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(root.join("shirushi-desktop.exe"), b"fixture").unwrap();
+        fs::write(root.join(".venv-py312/Scripts/python.exe"), b"fixture").unwrap();
+        fs::write(root.join("scripts/shirushi_bridge.py"), b"fixture").unwrap();
+        if include_profile {
+            fs::create_dir_all(root.join("demo-profile/Shirushi/personal-mark")).unwrap();
+            fs::write(
+                root.join("demo-profile/Shirushi/personal-mark/personal-mark-v2.json"),
+                br#"{"version":2,"type":"typed","text":"Niki","renderProfile":{"id":"shirushi-typed","version":1}}"#,
+            )
+            .unwrap();
+        }
+        let root = fs::canonicalize(root).unwrap();
+        let executable = root.join("shirushi-desktop.exe");
+        (root, executable)
+    }
+
     fn host_for_test_channel(
         commands: Sender<WorkerCommand>,
         worker: Option<JoinHandle<()>>,
@@ -818,6 +1029,118 @@ mod tests {
         let result = host.request(crate::protocol::LOAD_PERSONAL_MARK).unwrap();
         assert_eq!(result.get("state").and_then(Value::as_str), Some("absent"));
         drop(host);
+    }
+
+    #[test]
+    fn default_repository_config_keeps_existing_arguments_and_environment() {
+        let local = unique_test_directory("default-profile");
+        let config = LaunchConfig::production_fixture(&local).unwrap();
+        assert_eq!(config.arguments[0], "-I");
+        assert_eq!(config.arguments[1], "-u");
+        assert!(!config.arguments.iter().any(|argument| argument == "-B"));
+        assert_eq!(config.environment.len(), 1);
+        assert_eq!(config.environment[0].0, OsStr::new("LOCALAPPDATA"));
+        assert_eq!(config.environment[0].1, local.as_os_str());
+    }
+
+    #[test]
+    fn strict_fixed_paths_reject_parent_escape() {
+        let root = unique_test_directory("strict-root");
+        fs::create_dir_all(&root).unwrap();
+        let error = canonical_fixed_file_strict(&root, Path::new("../outside.py")).unwrap_err();
+        assert_eq!(error.code, "BRIDGE_UNAVAILABLE");
+    }
+
+    #[cfg(feature = "manual-canary")]
+    #[test]
+    fn manual_canary_config_is_portable_isolated_and_bytecode_free() {
+        let (root, executable) = create_canary_layout("portable-canary", true);
+        assert_eq!(package_root_from_executable(&executable).unwrap(), root);
+        let profile = validate_canary_profile(&root).unwrap();
+        let config = LaunchConfig::for_repository(&root, Some(profile.clone()), true).unwrap();
+        assert_eq!(config.executable, root.join(".venv-py312/Scripts/python.exe"));
+        assert_eq!(
+            config.arguments,
+            vec![
+                "-I".to_string(),
+                "-u".to_string(),
+                "-B".to_string(),
+                root.join("scripts/shirushi_bridge.py").to_string_lossy().into_owned(),
+            ]
+        );
+        assert_eq!(config.environment, vec![(OsString::from("LOCALAPPDATA"), profile.into_os_string())]);
+    }
+
+    #[cfg(feature = "manual-canary")]
+    #[test]
+    fn manual_preparation_forces_profile_and_isolated_webview_directory() {
+        let _guard = ENVIRONMENT_TEST_LOCK.lock().unwrap();
+        let inherited = env::var_os(LOCAL_APP_DATA_ENV);
+        let (root, executable) = create_canary_layout("prepared-canary", true);
+        env::set_var(LOCAL_APP_DATA_ENV, root.join("real-user-profile-sentinel"));
+        let webview = prepare_manual_canary_environment(&executable).unwrap();
+        let profile = root.join(CANARY_PROFILE);
+        assert_eq!(env::var_os(LOCAL_APP_DATA_ENV), Some(profile.clone().into_os_string()));
+        assert_eq!(webview, profile.join("Shirushi/canary-webview"));
+        assert!(webview.is_dir());
+        match inherited {
+            Some(value) => env::set_var(LOCAL_APP_DATA_ENV, value),
+            None => env::remove_var(LOCAL_APP_DATA_ENV),
+        }
+    }
+
+    #[cfg(feature = "manual-canary")]
+    #[test]
+    fn failed_canary_preparation_never_restores_inherited_profile() {
+        let _guard = ENVIRONMENT_TEST_LOCK.lock().unwrap();
+        let inherited = env::var_os(LOCAL_APP_DATA_ENV);
+        let (root, executable) = create_canary_layout("missing-canary-profile", false);
+        env::set_var(LOCAL_APP_DATA_ENV, root.join("real-user-profile-sentinel"));
+        let error = prepare_manual_canary_environment(&executable).unwrap_err();
+        assert_eq!(error.code, "BRIDGE_UNAVAILABLE");
+        assert_eq!(env::var_os(LOCAL_APP_DATA_ENV), Some(root.join(CANARY_PROFILE).into_os_string()));
+        match inherited {
+            Some(value) => env::set_var(LOCAL_APP_DATA_ENV, value),
+            None => env::remove_var(LOCAL_APP_DATA_ENV),
+        }
+    }
+
+    #[cfg(feature = "manual-canary")]
+    #[test]
+    fn exact_unavailable_flag_fails_before_spawn() {
+        let _guard = ENVIRONMENT_TEST_LOCK.lock().unwrap();
+        let inherited = env::var_os(CANARY_UNAVAILABLE_ENV);
+        env::set_var(CANARY_UNAVAILABLE_ENV, "01");
+        assert!(!sidecar_unavailable_requested());
+        env::set_var(CANARY_UNAVAILABLE_ENV, "1");
+        assert!(sidecar_unavailable_requested());
+        assert_eq!(LaunchConfig::production().unwrap_err().code, "BRIDGE_UNAVAILABLE");
+        match inherited {
+            Some(value) => env::set_var(CANARY_UNAVAILABLE_ENV, value),
+            None => env::remove_var(CANARY_UNAVAILABLE_ENV),
+        }
+    }
+
+    #[cfg(feature = "manual-canary")]
+    #[test]
+    fn linked_canary_profile_is_rejected_when_links_are_available() {
+        let (root, _) = create_canary_layout("linked-canary-profile", false);
+        let outside = unique_test_directory("linked-profile-target");
+        fs::create_dir_all(outside.join("Shirushi/personal-mark")).unwrap();
+        fs::write(
+            outside.join("Shirushi/personal-mark/personal-mark-v2.json"),
+            b"{}",
+        )
+        .unwrap();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&outside, root.join(CANARY_PROFILE));
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, root.join(CANARY_PROFILE));
+        if linked.is_err() {
+            return;
+        }
+        let error = validate_canary_profile(&root).unwrap_err();
+        assert_eq!(error.code, "BRIDGE_UNAVAILABLE");
     }
 
     #[test]
