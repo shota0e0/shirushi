@@ -104,6 +104,16 @@ impl Drop for RequestLease<'_> {
         }
     }
 }
+/// Supervisor-observed completion flags at a main-loop timeout, before cleanup.
+/// Diagnostic evidence only: not serialized into any helper or UI contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreCleanupWaitState {
+    pub stdout_done: bool,
+    pub stderr_done: bool,
+    pub stdin_done: bool,
+    pub parent_exit_seen: bool,
+}
+
 #[derive(Debug)]
 pub struct ProcessReport {
     pub outcome: HelperOutcome,
@@ -113,6 +123,8 @@ pub struct ProcessReport {
     pub exit_code: Option<i32>,
     /// Raw stderr is bounded then discarded, never exposed in diagnostics.
     pub stderr_bytes: usize,
+    /// None unless the main wait loop itself selected its deadline timeout.
+    pub pre_cleanup_wait_state: Option<PreCleanupWaitState>,
 }
 /// Trusted host/test injection only. No frontend-supplied executable or env override.
 /// This slice deliberately does not establish Production packaging/discovery.
@@ -418,6 +430,7 @@ mod windows {
             job_total_processes: Some(0),
             exit_code: None,
             stderr_bytes: 0,
+            pre_cleanup_wait_state: None,
         }
     }
     fn cleanup(
@@ -521,6 +534,7 @@ mod windows {
                 job_total_processes: total,
                 exit_code: exit,
                 stderr_bytes: 0,
+                pre_cleanup_wait_state: None,
             };
         }
         if let Ok(mut c) = control.0.lock() {
@@ -571,6 +585,7 @@ mod windows {
                 job_total_processes: total,
                 exit_code: exit,
                 stderr_bytes: 0,
+                pre_cleanup_wait_state: None,
             };
         }
         let mut terminal: Option<ServiceFailure> = None;
@@ -579,11 +594,24 @@ mod windows {
         let mut err_done = false;
         let mut in_done = false;
         let mut exit = None;
+        let mut pre_cleanup_wait_state = None;
         loop {
             // Invalidate before considering any queued/late successful response.
-            let stopped = control
-                .failure(id, _lease.epoch)
-                .or_else(|| (start.elapsed() >= deadline).then_some(ServiceFailure::Timeout));
+            let stopped = control.failure(id, _lease.epoch).or_else(|| {
+                if start.elapsed() >= deadline {
+                    // Capture only already-received worker completions and
+                    // try_wait observations, never later cleanup/reap values.
+                    pre_cleanup_wait_state = Some(PreCleanupWaitState {
+                        stdout_done: output.is_some(),
+                        stderr_done: err_done,
+                        stdin_done: in_done,
+                        parent_exit_seen: exit.is_some(),
+                    });
+                    Some(ServiceFailure::Timeout)
+                } else {
+                    None
+                }
+            });
             if let Some(e) = stopped {
                 terminal = Some(e);
                 break;
@@ -700,6 +728,7 @@ mod windows {
             job_total_processes: total,
             exit_code: observed_exit,
             stderr_bytes,
+            pre_cleanup_wait_state,
         }
     }
     pub fn inspect(

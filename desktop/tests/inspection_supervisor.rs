@@ -462,6 +462,9 @@ mod process {
     fn descendant_cleanup_failure_supersedes_valid_response() {
         let r = run(SyntheticBehavior::LeakyChild, &Control::new(ID), DEADLINE);
         cleaned(&r);
+        if r.outcome == HelperOutcome::Failure(ServiceFailure::Timeout) {
+            assert!(r.pre_cleanup_wait_state.is_some(), "{r:?}");
+        }
         assert_eq!(
             r.outcome,
             HelperOutcome::Failure(ServiceFailure::CleanupFailed),
