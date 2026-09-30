@@ -267,10 +267,10 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
-      APPROVED_SOURCE_SHA: 0bea483d650cf89716ace0bd0589c60e7eb14b56
-      APPROVED_RUNNER_SHA256: 9482fe89345af3d8b856131cac84668536e0efef938ab8acfc98640f7f0aab1b
+      APPROVED_SOURCE_SHA: 6f015ef00fa929dfc9f3c85d8f4b699c6ec6f205
+      APPROVED_RUNNER_SHA256: 6d6bef9cb9563f611e243f3bfd028b75fad9c9b55178add85190b3d602c5d93a
       APPROVED_LOCK_SHA256: d628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069
-      APPROVED_RUNNER_BLOB_OID: e8d5735f34374827b341dbe5daf118e65ce47db2
+      APPROVED_RUNNER_BLOB_OID: 6f6731d3c50d53068b5fa20e45b16b4967ef4bb7
       APPROVED_LOCK_BLOB_OID: cbfdaabcaea09497feba169e934af93941678c3e
       WORKFLOW_SHA: ${{ github.sha }}
     steps:
@@ -437,6 +437,9 @@ jobs:
           $readback = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
           if ($readback.source_commit -ne $env:APPROVED_SOURCE_SHA -or $readback.cargo_lock_blob_oid -ne $env:APPROVED_LOCK_BLOB_OID -or $readback.cargo_lock_sha256 -ne $env:APPROVED_LOCK_SHA256 -or $readback.runner_source_blob_oid -ne $env:APPROVED_RUNNER_BLOB_OID -or $readback.runner_source_sha256 -ne $env:APPROVED_RUNNER_SHA256 -or $readback.workflow_run_id -ne '${{ github.run_id }}' -or $readback.files.Count -ne 1 -or $readback.files[0].path -ne 'shirushi-limited-canary.exe' -or $readback.files[0].bytes -ne (Get-Item -LiteralPath $stagedExe).Length -or $readback.files[0].sha256 -ne (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()) { throw "Evidence readback mismatch" }
           $evidenceHash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "TRANSPORT_AUDIT_OK: files=2 runtime_upload_count=0 runner_bytes=$($exeInfo.Length) runner_sha256=$exeHash evidence_sha256=$evidenceHash"
+          "TRANSPORT_INVENTORY: runner-evidence.json,shirushi-limited-canary.exe"
+          "RUNNER_EVIDENCE: $(ConvertTo-Json -InputObject $readback -Depth 5 -Compress)"
           @("# Development runner transport only", "Approved source: $env:APPROVED_SOURCE_SHA", "Workflow revision: $env:WORKFLOW_SHA", "Runner SHA-256: $exeHash", "Evidence SHA-256: $evidenceHash", "Exact files: 2; no runtime/wheels/Mark/seal/acquisition/local inputs", "No native Prepare, seal, inspection or runner execution. Distribution Compliance NOT READY; Full F3A NOT READY.") | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - name: Upload ONLY development runner and sanitized evidence
