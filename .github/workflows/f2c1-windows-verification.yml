@@ -8,6 +8,14 @@ on:
         type: boolean
         required: false
         default: false
+      desktop_inspection_scope:
+        description: "Desktop-only scope; cleanup diagnostic uses frozen source and bounded comparisons"
+        type: choice
+        required: false
+        default: adapter
+        options:
+          - adapter
+          - workspace_cleanup_diagnostic
       first_rust_only:
         description: "Run only the F3A first Rust-test gate; no runtime, package or upload"
         type: boolean
@@ -47,7 +55,7 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
-      EVIDENCE_SHA: ${{ github.sha }}
+      EVIDENCE_SHA: ${{ inputs.desktop_inspection_scope == 'workspace_cleanup_diagnostic' && '3e9cc6e0c5a1fb537db69ae4107fa37b071dfcb2' || github.sha }}
     steps:
       - name: Reject conflicting bounded modes
         id: mode
@@ -62,6 +70,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.desktop_inspection_scope == 'workspace_cleanup_diagnostic' && '3e9cc6e0c5a1fb537db69ae4107fa37b071dfcb2' || github.sha }}
 
       - name: Assert exact source and record frozen inputs
         id: source
@@ -81,6 +90,7 @@ jobs:
 
       - name: Set up existing BridgeHost test interpreter only
         id: python_setup
+        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.12.10
@@ -88,6 +98,7 @@ jobs:
 
       - name: Create dependency-free BridgeHost fixture environment
         id: bridge_fixture
+        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -124,6 +135,7 @@ jobs:
 
       - name: Test Desktop default suites including BridgeHost offline
         id: desktop_default
+        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
           cargo test --locked --offline --manifest-path desktop\Cargo.toml -- --nocapture
@@ -131,6 +143,7 @@ jobs:
 
       - name: Test Desktop manual-canary suites including Personal Mark offline
         id: desktop_manual
+        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
           cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml -- --nocapture
@@ -138,6 +151,7 @@ jobs:
 
       - name: Require inspection-supervisor integration coverage
         id: inspection_coverage
+        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
           # Full cargo test above automatically runs this integration target in
@@ -146,6 +160,45 @@ jobs:
             throw "INSPECTION_SUPERVISOR_TEST_TARGET_MISSING"
           }
           'Inspection-supervisor integration target was included in both full Rust suites.'
+
+      - name: Diagnose exact failed Workspace test serially
+        id: cleanup_isolated
+        if: inputs.desktop_inspection_scope == 'workspace_cleanup_diagnostic'
+        shell: pwsh
+        run: |
+          if (Test-Path Env:RUST_TEST_THREADS) { throw "UNEXPECTED_TEST_THREAD_OVERRIDE" }
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --bin shirushi-limited-canary runner::tests::partial_reuse_refuses_before_requested_python_is_probed -- --exact --nocapture --test-threads=1
+          $code = $LASTEXITCODE
+          "WORKSPACE_ISOLATED_SERIAL_EXIT: $code"
+          exit $code
+
+      - name: Diagnose full limited-runner test binary serially
+        id: cleanup_serial
+        if: inputs.desktop_inspection_scope == 'workspace_cleanup_diagnostic'
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --bin shirushi-limited-canary -- --nocapture --test-threads=1
+          $code = $LASTEXITCODE
+          "WORKSPACE_FULL_SERIAL_EXIT: $code"
+          exit $code
+
+      - name: Compare three independent normal-parallel limited-runner runs
+        id: cleanup_parallel
+        if: inputs.desktop_inspection_scope == 'workspace_cleanup_diagnostic' && steps.cleanup_isolated.outcome == 'success' && steps.cleanup_serial.outcome == 'success'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          if (Test-Path Env:RUST_TEST_THREADS) { throw "UNEXPECTED_TEST_THREAD_OVERRIDE" }
+          $failed = $false
+          for ($comparison = 1; $comparison -le 3; $comparison++) {
+            "WORKSPACE_PARALLEL_RUN_${comparison}_BEGIN"
+            cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --bin shirushi-limited-canary -- --nocapture
+            $code = $LASTEXITCODE
+            "WORKSPACE_PARALLEL_RUN_${comparison}_EXIT: $code"
+            "WORKSPACE_PARALLEL_${comparison}_EXIT=$code" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+            if ($code -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
 
       - name: Recheck frozen inputs
         id: preservation
@@ -163,17 +216,29 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $requestedTests = 'Requested tests: Desktop default + manual-canary full Rust suites; inspection-supervisor integration target; existing BridgeHost/Personal Mark Rust regressions.'
+          $bridgeFixture = 'BridgeHost fixture: dependency-free CPython test venv only; F3A runtime reconstruction = NOT RUN.'
+          if ('${{ inputs.desktop_inspection_scope }}' -eq 'workspace_cleanup_diagnostic') {
+            $requestedTests = 'Requested tests: exact failed test serially; entire limited-runner bin serially; at most three separate normal-parallel full-bin comparisons after serial PASS.'
+            $bridgeFixture = 'BridgeHost fixture preparation = NOT RUN; Python runtime reconstruction = NOT RUN.'
+          }
           $summary = @(
             '# DESKTOP_INSPECTION_ONLY',
             "Tested SHA: $env:EVIDENCE_SHA",
-            'Requested tests: Desktop default + manual-canary full Rust suites; inspection-supervisor integration target; existing BridgeHost/Personal Mark Rust regressions.',
+            "Desktop-only scope: ${{ inputs.desktop_inspection_scope }}",
+            $requestedTests,
             "Mode validation: ${{ steps.mode.outcome }}",
             "Desktop default tests: ${{ steps.desktop_default.outcome }}",
             "Desktop manual-canary tests: ${{ steps.desktop_manual.outcome }}",
             "Required inspection-supervisor target: ${{ steps.inspection_coverage.outcome }}",
+            "Workspace isolated serial diagnostic: ${{ steps.cleanup_isolated.outcome }}",
+            "Workspace full-bin serial diagnostic: ${{ steps.cleanup_serial.outcome }}",
+            "Workspace bounded parallel diagnostic: ${{ steps.cleanup_parallel.outcome }}",
+            "Parallel comparison exit codes: $env:WORKSPACE_PARALLEL_1_EXIT / $env:WORKSPACE_PARALLEL_2_EXIT / $env:WORKSPACE_PARALLEL_3_EXIT",
             "Frozen-input recheck: ${{ steps.preservation.outcome }}",
             'Missing or skipped inspection-supervisor tests are NOT a PASS.',
-            'BridgeHost fixture: dependency-free CPython test venv only; F3A runtime reconstruction = NOT RUN.',
+            'Cleanup diagnostic does not implement or verify the Desktop adapter. Serial/parallel comparison is not direct pathname-reuse evidence.',
+            $bridgeFixture,
             'package generation = NOT RUN',
             'package audit / Prepare equivalence / runner transport / helper transport = NOT RUN',
             'artifact upload = NOT RUN',
