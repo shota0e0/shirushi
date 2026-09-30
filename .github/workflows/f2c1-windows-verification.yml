@@ -269,7 +269,9 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
       APPROVED_SOURCE_SHA: 0bea483d650cf89716ace0bd0589c60e7eb14b56
       APPROVED_RUNNER_SHA256: 9482fe89345af3d8b856131cac84668536e0efef938ab8acfc98640f7f0aab1b
-      APPROVED_LOCK_SHA256: e9c45a2ec307189e0cab2af7712244f9bd2353e1389e5b6dc608fcd9aeb4f4fc
+      APPROVED_LOCK_SHA256: d628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069
+      APPROVED_RUNNER_BLOB_OID: e8d5735f34374827b341dbe5daf118e65ce47db2
+      APPROVED_LOCK_BLOB_OID: cbfdaabcaea09497feba169e934af93941678c3e
       WORKFLOW_SHA: ${{ github.sha }}
     steps:
       - name: Reject conflicting transport modes
@@ -281,6 +283,13 @@ jobs:
 
       - name: Check out immutable approved runner source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          # Step-scoped Git configuration: affects only this isolated CI checkout.
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
         with:
           ref: ${{ env.APPROVED_SOURCE_SHA }}
           persist-credentials: false
@@ -289,12 +298,50 @@ jobs:
         id: identity
         shell: pwsh
         run: |
+          git config --local core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git config --local core.eol lf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $sourceSha = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($sourceSha -ne $env:APPROVED_SOURCE_SHA) { throw "Approved source revision mismatch" }
-          $runnerHash = (Get-FileHash -LiteralPath desktop\src\bin\shirushi-limited-canary.rs -Algorithm SHA256).Hash.ToLowerInvariant()
-          $lockHash = (Get-FileHash -LiteralPath desktop\Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($runnerHash -ne $env:APPROVED_RUNNER_SHA256 -or $lockHash -ne $env:APPROVED_LOCK_SHA256) { throw "Approved source/lock bytes mismatch" }
+          function Read-CanonicalBlob([string]$oid) {
+            if ($oid -notmatch '^[0-9a-f]{40}$') { throw "Unexpected source blob OID" }
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = 'git'
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($arg in @('cat-file', 'blob', $oid)) { $start.ArgumentList.Add($arg) }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            $buffer = [IO.MemoryStream]::new()
+            try {
+              if (-not $process.Start()) { throw "Canonical blob reader did not start" }
+              $errorRead = $process.StandardError.ReadToEndAsync()
+              $process.StandardOutput.BaseStream.CopyTo($buffer)
+              $process.WaitForExit()
+              $null = $errorRead.GetAwaiter().GetResult()
+              if ($process.ExitCode -ne 0) { throw "Canonical blob reader failed" }
+              return ,$buffer.ToArray()
+            } finally { $buffer.Dispose(); $process.Dispose() }
+          }
+          $sources = @(
+            @{ path = 'desktop/Cargo.lock'; oid = $env:APPROVED_LOCK_BLOB_OID; sha256 = $env:APPROVED_LOCK_SHA256 },
+            @{ path = 'desktop/src/bin/shirushi-limited-canary.rs'; oid = $env:APPROVED_RUNNER_BLOB_OID; sha256 = $env:APPROVED_RUNNER_SHA256 }
+          )
+          foreach ($source in $sources) {
+            $oid = git rev-parse "${sourceSha}:$($source.path)"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($oid -ne $source.oid) { throw "Approved source blob OID mismatch" }
+            [byte[]]$blob = Read-CanonicalBlob $oid
+            [byte[]]$file = [IO.File]::ReadAllBytes((Join-Path (Get-Location).Path $source.path))
+            $blobHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($blob)).ToLowerInvariant()
+            $fileHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($file)).ToLowerInvariant()
+            if ($blobHash -ne $source.sha256 -or $fileHash -ne $source.sha256 -or $file.Length -ne $blob.Length) { throw "Canonical raw blob/build-tree bytes mismatch" }
+            for ($i = 0; $i -lt $blob.Length; $i++) { if ($blob[$i] -ne $file[$i]) { throw "Build-tree byte differs from canonical blob" } }
+            "CANONICAL_SOURCE_OK: path=$($source.path) oid=$oid sha256=$blobHash bytes=$($blob.Length)"
+          }
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $rustVersion = rustc --version
@@ -302,10 +349,16 @@ jobs:
           $cargoVersion = cargo --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not $rustVersion.StartsWith("rustc 1.97.1 ") -or -not $cargoVersion.StartsWith("cargo 1.97.1 ")) { throw "Pinned toolchain mismatch" }
+          $rustIdentity = @(rustc --version --verbose)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cargoIdentity = @(cargo --version --verbose)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runner-transport-target')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           "F3A_RUNNER_TRANSPORT_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runner-transport')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           "rust_version=$rustVersion" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
           "cargo_version=$cargoVersion" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "rustc_identity_json=$(ConvertTo-Json -InputObject $rustIdentity -Compress)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "cargo_identity_json=$(ConvertTo-Json -InputObject $cargoIdentity -Compress)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
 
       - name: Fetch only locked Rust build dependencies
         shell: pwsh
@@ -331,6 +384,13 @@ jobs:
           $runnerHash = (Get-FileHash -LiteralPath desktop\src\bin\shirushi-limited-canary.rs -Algorithm SHA256).Hash.ToLowerInvariant()
           $lockHash = (Get-FileHash -LiteralPath desktop\Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($runnerHash -ne $env:APPROVED_RUNNER_SHA256 -or $lockHash -ne $env:APPROVED_LOCK_SHA256) { throw "Build changed approved source/lock" }
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runnerOid = git rev-parse "${sourceSha}:desktop/src/bin/shirushi-limited-canary.rs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $lockOid = git rev-parse "${sourceSha}:desktop/Cargo.lock"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceSha -ne $env:APPROVED_SOURCE_SHA -or $runnerOid -ne $env:APPROVED_RUNNER_BLOB_OID -or $lockOid -ne $env:APPROVED_LOCK_BLOB_OID) { throw "Build changed canonical Git identity" }
           if (Test-Path -LiteralPath $env:F3A_RUNNER_TRANSPORT_DIR) { throw "Transport destination already exists" }
           New-Item -ItemType Directory -Path $env:F3A_RUNNER_TRANSPORT_DIR | Out-Null
           $builtExe = Join-Path $env:CARGO_TARGET_DIR 'debug/shirushi-limited-canary.exe'
@@ -346,10 +406,19 @@ jobs:
             repository = 'shota0e0/shirushi'
             source_commit = $env:APPROVED_SOURCE_SHA
             workflow_commit = $env:WORKFLOW_SHA
+            workflow_run_id = '${{ github.run_id }}'
+            workflow_run_attempt = '${{ github.run_attempt }}'
+            workflow_run_url = 'https://github.com/shota0e0/shirushi/actions/runs/${{ github.run_id }}'
+            source_identity = 'EXACT_COMMIT_GIT_BLOB_OID_RAW_SHA256'
+            runner_source_blob_oid = $runnerOid
             runner_source_sha256 = $env:APPROVED_RUNNER_SHA256
+            cargo_lock_blob_oid = $lockOid
             cargo_lock_sha256 = $env:APPROVED_LOCK_SHA256
+            build_tree_matches_raw_blobs = $true
             rust_version = '${{ steps.identity.outputs.rust_version }}'
             cargo_version = '${{ steps.identity.outputs.cargo_version }}'
+            rustc_identity = ('${{ steps.identity.outputs.rustc_identity_json }}' | ConvertFrom-Json)
+            cargo_identity = ('${{ steps.identity.outputs.cargo_identity_json }}' | ConvertFrom-Json)
             target = 'x86_64-pc-windows-msvc'
             profile = 'debug'
             features = @('manual-canary')
@@ -366,7 +435,7 @@ jobs:
           if ($items.Count -ne 2 -or @($items | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $_.Name -notin $expected }).Count -ne 0) { throw "Unexpected transport file/link/directory" }
           if (@(Compare-Object $expected @($items.Name)).Count -ne 0) { throw "Transport exact file set mismatch" }
           $readback = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
-          if ($readback.source_commit -ne $env:APPROVED_SOURCE_SHA -or $readback.files.Count -ne 1 -or $readback.files[0].path -ne 'shirushi-limited-canary.exe' -or $readback.files[0].bytes -ne (Get-Item -LiteralPath $stagedExe).Length -or $readback.files[0].sha256 -ne (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()) { throw "Evidence readback mismatch" }
+          if ($readback.source_commit -ne $env:APPROVED_SOURCE_SHA -or $readback.cargo_lock_blob_oid -ne $env:APPROVED_LOCK_BLOB_OID -or $readback.cargo_lock_sha256 -ne $env:APPROVED_LOCK_SHA256 -or $readback.runner_source_blob_oid -ne $env:APPROVED_RUNNER_BLOB_OID -or $readback.runner_source_sha256 -ne $env:APPROVED_RUNNER_SHA256 -or $readback.workflow_run_id -ne '${{ github.run_id }}' -or $readback.files.Count -ne 1 -or $readback.files[0].path -ne 'shirushi-limited-canary.exe' -or $readback.files[0].bytes -ne (Get-Item -LiteralPath $stagedExe).Length -or $readback.files[0].sha256 -ne (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()) { throw "Evidence readback mismatch" }
           $evidenceHash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
           @("# Development runner transport only", "Approved source: $env:APPROVED_SOURCE_SHA", "Workflow revision: $env:WORKFLOW_SHA", "Runner SHA-256: $exeHash", "Evidence SHA-256: $evidenceHash", "Exact files: 2; no runtime/wheels/Mark/seal/acquisition/local inputs", "No native Prepare, seal, inspection or runner execution. Distribution Compliance NOT READY; Full F3A NOT READY.") | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
