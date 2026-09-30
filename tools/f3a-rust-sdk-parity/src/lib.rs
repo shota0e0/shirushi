@@ -8,6 +8,9 @@ use serde_json::{json, Map, Number, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt, io::Cursor};
 
+pub mod service;
+pub mod snapshot;
+
 pub const FIXTURE_SIZE: usize = 319495;
 pub const FIXTURE_SHA256: &str = "558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316";
 pub const MAX_JSON_BYTES: usize = 64 * 1024;
