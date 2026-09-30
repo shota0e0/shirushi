@@ -464,7 +464,8 @@ mod process {
         cleaned(&r);
         assert_eq!(
             r.outcome,
-            HelperOutcome::Failure(ServiceFailure::CleanupFailed)
+            HelperOutcome::Failure(ServiceFailure::CleanupFailed),
+            "{r:?}"
         );
         assert_eq!(r.job_total_processes, Some(2));
     }

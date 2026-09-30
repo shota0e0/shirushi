@@ -16,6 +16,7 @@ on:
         options:
           - adapter
           - workspace_cleanup_diagnostic
+          - descendant_cleanup_diagnostic
       first_rust_only:
         description: "Run only the F3A first Rust-test gate; no runtime, package or upload"
         type: boolean
@@ -90,7 +91,7 @@ jobs:
 
       - name: Set up existing BridgeHost test interpreter only
         id: python_setup
-        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
+        if: inputs.desktop_inspection_scope == 'adapter'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.12.10
@@ -98,7 +99,7 @@ jobs:
 
       - name: Create dependency-free BridgeHost fixture environment
         id: bridge_fixture
-        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
+        if: inputs.desktop_inspection_scope == 'adapter'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -135,7 +136,7 @@ jobs:
 
       - name: Test Desktop default library regressions including BridgeHost offline
         id: desktop_default
-        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
+        if: inputs.desktop_inspection_scope == 'adapter'
         shell: pwsh
         run: |
           cargo test --locked --offline --manifest-path desktop\Cargo.toml --lib -- --nocapture
@@ -143,7 +144,7 @@ jobs:
 
       - name: Test Desktop manual-canary library and Personal Mark regressions offline
         id: desktop_manual
-        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
+        if: inputs.desktop_inspection_scope == 'adapter'
         shell: pwsh
         run: |
           cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --lib -- --nocapture
@@ -151,7 +152,7 @@ jobs:
 
       - name: Test inspection-supervisor integration in both configurations
         id: inspection_coverage
-        if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
+        if: inputs.desktop_inspection_scope == 'adapter'
         shell: pwsh
         run: |
           if (-not (Test-Path -LiteralPath desktop/tests/inspection_supervisor.rs -PathType Leaf)) {
@@ -161,6 +162,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Attribute exact descendant cleanup test with at most three executions
+        id: descendant_isolated
+        if: inputs.desktop_inspection_scope == 'descendant_cleanup_diagnostic'
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            "DESCENDANT_ISOLATED_${attempt}_BEGIN"
+            cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor process::descendant_cleanup_failure_supersedes_valid_response -- --exact --nocapture
+            $code = $LASTEXITCODE
+            "DESCENDANT_ISOLATED_${attempt}_EXIT: $code"
+            "DESCENDANT_ISOLATED_ATTEMPTS=$attempt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+            if ($code -ne 0) { exit $code }
+          }
+
+      - name: Run default supervisor target only after all isolated passes
+        id: descendant_full
+        if: inputs.desktop_inspection_scope == 'descendant_cleanup_diagnostic' && steps.descendant_isolated.outcome == 'success'
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
+          exit $LASTEXITCODE
 
       - name: Diagnose exact failed Workspace test serially
         id: cleanup_isolated
@@ -225,6 +249,11 @@ jobs:
             $bridgeFixture = 'BridgeHost fixture preparation = NOT RUN; Python runtime reconstruction = NOT RUN.'
             $parkedTests = 'parked limited-canary binary tests = RUN only by this explicitly selected frozen cleanup diagnostic; no allocator or cleanup fix.'
           }
+          if ('${{ inputs.desktop_inspection_scope }}' -eq 'descendant_cleanup_diagnostic') {
+            $requestedTests = 'Requested tests: exact default descendant cleanup test; at most three total isolated executions, stop on first failure; full default inspection_supervisor once only after all isolated PASS. Manual-canary integration = NOT RUN.'
+            $bridgeFixture = 'BridgeHost fixture preparation = NOT RUN; Python runtime reconstruction = NOT RUN.'
+            $parkedTests = 'parked limited-canary binary tests = NOT RUN BY THIS DIAGNOSTIC.'
+          }
           $summary = @(
             '# DESKTOP_INSPECTION_ONLY',
             "Tested SHA: $env:EVIDENCE_SHA",
@@ -234,6 +263,8 @@ jobs:
             "Desktop default tests: ${{ steps.desktop_default.outcome }}",
             "Desktop manual-canary tests: ${{ steps.desktop_manual.outcome }}",
             "Inspection-supervisor integration (default + manual-canary): ${{ steps.inspection_coverage.outcome }}",
+            "Descendant isolated diagnostic: ${{ steps.descendant_isolated.outcome }}; executions: $env:DESCENDANT_ISOLATED_ATTEMPTS",
+            "Conditional default full supervisor target: ${{ steps.descendant_full.outcome }}",
             "Workspace isolated serial diagnostic: ${{ steps.cleanup_isolated.outcome }}",
             "Workspace full-bin serial diagnostic: ${{ steps.cleanup_serial.outcome }}",
             "Workspace bounded parallel diagnostic: ${{ steps.cleanup_parallel.outcome }}",
