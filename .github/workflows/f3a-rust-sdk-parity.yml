@@ -1,0 +1,122 @@
+name: F3A isolated Rust SDK semantic parity PoC
+
+on:
+  push:
+    branches: [codex/f3a-rust-sdk-parity]
+    paths:
+      - tools/f3a-rust-sdk-parity/**
+      - docs/development/f3a-rust-sdk-parity*
+      - .github/workflows/f3a-rust-sdk-parity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f3a-isolated-sdk-parity-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sdk_parity:
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: ${{ runner.temp }}/f3a-sdk-parity-target
+    steps:
+      - name: Check out exact isolated PoC commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Materialize and verify canonical PoC lock and immutable fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne '${{ github.sha }}') { throw 'CHECKOUT_IDENTITY_MISMATCH' }
+          git config --local core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'SCOPED_GIT_CONFIG_FAILED' }
+          git -c core.autocrlf=false -c core.eol=lf checkout-index --force -- tools/f3a-rust-sdk-parity/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'LOCK_MATERIALIZATION_FAILED' }
+          $lockPath = 'tools/f3a-rust-sdk-parity/Cargo.lock'
+          $expectedLock = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+          $blob = git rev-parse "HEAD:$lockPath"
+          if ($LASTEXITCODE -ne 0) { throw 'LOCK_BLOB_ID_FAILED' }
+          $start = [System.Diagnostics.ProcessStartInfo]::new('git')
+          $start.UseShellExecute = $false
+          $start.RedirectStandardOutput = $true
+          $start.ArgumentList.Add('cat-file')
+          $start.ArgumentList.Add('blob')
+          $start.ArgumentList.Add($blob)
+          $process = [System.Diagnostics.Process]::Start($start)
+          $memory = [System.IO.MemoryStream]::new()
+          $process.StandardOutput.BaseStream.CopyTo($memory)
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) { throw 'RAW_LOCK_BLOB_READ_FAILED' }
+          $rawHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($memory.ToArray())).ToLowerInvariant()
+          $memory.Dispose()
+          $process.Dispose()
+          $checkoutHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($rawHash -ne $expectedLock -or $checkoutHash -ne $rawHash) { throw 'FROZEN_LOCK_MISMATCH' }
+          $fixture = Get-Item -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png'
+          $fixtureHash = (Get-FileHash -LiteralPath $fixture.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($fixture.Length -ne 319495 -or $fixtureHash -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
+          "TESTED_COMMIT: $head"
+          "LOCK_BLOB_OID: $blob"
+          "LOCK_RAW_SHA256: $rawHash"
+          "FIXTURE_SHA256: $fixtureHash"
+          'ARTIFACT_UPLOAD_COUNT: 0'
+
+      - name: Install and assert existing pinned Windows Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rust = rustc --version
+          if ($LASTEXITCODE -ne 0 -or -not $rust.StartsWith('rustc 1.97.1 ')) { throw 'RUST_VERSION_MISMATCH' }
+          $cargo = cargo --version
+          if ($LASTEXITCODE -ne 0 -or -not $cargo.StartsWith('cargo 1.97.1 ')) { throw 'CARGO_VERSION_MISMATCH' }
+          "RUST: $rust"
+          "CARGO: $cargo"
+
+      - name: Fetch only the frozen isolated crate dependencies
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assert approved Windows dependency and feature footprint
+        shell: pwsh
+        run: |
+          $raw = cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadata = $raw | ConvertFrom-Json
+          $sdk = @($metadata.packages | Where-Object name -EQ 'c2pa')
+          if ($sdk.Count -ne 1 -or $sdk[0].version -ne '0.85.0') { throw 'SDK_VERSION_MISMATCH' }
+          $features = @(($metadata.resolve.nodes | Where-Object id -EQ $sdk[0].id).features)
+          if ($features.Count -ne 1 -or $features[0] -ne 'rust_native_crypto') { throw 'SDK_FEATURE_MISMATCH' }
+          $tree = @(cargo tree --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --prefix none --format '{p}' --no-dedupe | Sort-Object -Unique)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($tree.Count -ne 240) { throw 'DEPENDENCY_FOOTPRINT_MISMATCH' }
+          $active = @($metadata.packages | Where-Object { $tree -Match ('^'+[regex]::Escape($_.name+' v'+$_.version)+'(?: |$)') })
+          $scripts = @($active | Where-Object { @($_.targets | Where-Object kind -Contains 'custom-build').Count })
+          if ($scripts.Count -ne 26 -or @($active | Where-Object links).Count -ne 0) { throw 'BUILD_SCRIPT_OR_NATIVE_FOOTPRINT_MISMATCH' }
+          if (@($active | Where-Object name -Match '^(reqwest|ureq|wstd|openssl|openssl-sys|ring|aws-lc-sys|cc|sha2-asm)$').Count) { throw 'UNAPPROVED_RUNTIME_BACKEND' }
+          'SDK: c2pa 0.85.0; rust_native_crypto only; HTTP features disabled'
+          'WINDOWS_GRAPH: 240 packages; 26 build scripts; no Cargo links'
+
+      - name: Run actual SDK fixture and pure adapter contract tests offline
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Recheck immutable inputs and no upload boundary
+        if: always()
+        shell: pwsh
+        run: |
+          if ((Get-FileHash -LiteralPath 'tools/f3a-rust-sdk-parity/Cargo.lock' -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'LOCK_CHANGED' }
+          if ((Get-FileHash -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
+          'ARTIFACT_UPLOAD_COUNT: 0; NO PRODUCTION ADOPTION'
