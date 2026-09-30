@@ -203,7 +203,6 @@ pub fn adapt(e: &SdkEvidence) -> Result<Value, Failure> {
         || e.validation_state != "VALID"
         || label.is_empty()
         || !e.ingredient_success.is_empty()
-        || !e.ingredient_informational.is_empty()
         || !e.ingredient_failure.is_empty()
         || !e.legacy_statuses.is_empty()
         || e.success.iter().any(|s| !known_success(&s.code))
@@ -238,6 +237,20 @@ pub fn adapt(e: &SdkEvidence) -> Result<Value, Failure> {
         {
             return Err(bad());
         }
+    }
+    // SDK0.85.0 store::ingredient_checks emits this exact informational code
+    // for an ingredient without a manifest. The oracle checks ingredient
+    // failures, not this notice. It must refer to the signed active ingredient;
+    // it never supplies signature/digest/asset-binding evidence itself.
+    if e.ingredient_informational.iter().any(|s| {
+        s.code != "ingredient.unknownProvenance"
+            || s.url.as_deref() != Some(format!("{assertion_prefix}c2pa.ingredient.v3").as_str())
+            || !s
+                .url
+                .as_ref()
+                .is_some_and(|url| unique.contains(url.as_str()))
+    }) {
+        return Err(bad());
     }
     if !e.success.iter().any(|s| {
         s.code == "assertion.dataHash.match"

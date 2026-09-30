@@ -28,6 +28,19 @@ canonical raw Git lock/checkout SHA verification, frozen240/26 footprint checks,
 locked offline cargo tests after build-time fetch. No upload steps/artifacts.
 No Owner-local executable build/run or policy changes.
 
+CI execution checkpoints (not parity PASS): run36706641971 had zero jobs because
+runner context was used at job-env scope; moving that unchanged target directory
+to step-env fixed the isolated workflow only. Runs36706866527/36707805785 compiled
+the frozen SDK and passed25/26 tests. Positive mapping stopped on an adapter
+over-restriction: ingredient deltas had exactly informational
+ingredient.unknownProvenance (success0/failure0; legacy0), while the oracle checks
+ingredient failures only. SDK0.85.0 store.rs ingredient_checks and
+validation_results.rs LogKind classify it as an informational no-manifest notice.
+The narrow correction requires its exact category/code and signed active
+c2pa.ingredient.v3 reference/digest; it cannot satisfy active evidence. Unknown
+codes, wrong categories, ingredient failures and unsigned/cross-claim notices
+still reject. Positive parity and two added regression cases remain pending CI.
+
 SDK runtime source audit: PoC implements no subprocess or network calls; exact
 SDK src process-command occurrences are in cfg(test) ephemeral_cert tests, not
 the dependency-library Reader path. Rust-native crypto only; no HTTP backend.

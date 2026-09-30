@@ -200,6 +200,64 @@ fn ingredient_or_cross_claim_evidence_cannot_satisfy_active_claim() {
     rejects(|e| e.references[0] = "self#jumbf=/c2pa/other/c2pa.assertions/c2pa.hash.data".into());
 }
 
+fn with_known_ingredient_notice() -> SdkEvidence {
+    let mut e = good();
+    let url = "self#jumbf=/c2pa/urn:c2pa:test/c2pa.assertions/c2pa.ingredient.v3".to_owned();
+    e.references.push(url.clone());
+    e.success.push(Status {
+        code: "assertion.hashedURI.match".into(),
+        url: Some(url.clone()),
+    });
+    e.ingredient_informational.push(Status {
+        code: "ingredient.unknownProvenance".into(),
+        url: Some(url),
+    });
+    e
+}
+
+#[test]
+fn known_ingredient_notice_preserves_oracle_without_supplying_active_evidence() {
+    let e = with_known_ingredient_notice();
+    assert_eq!(adapt(&e).unwrap(), canonical_success());
+    for missing in [
+        "claimSignature.validated",
+        "assertion.hashedURI.match",
+        "assertion.dataHash.match",
+    ] {
+        let mut absent = e.clone();
+        absent.success.retain(|s| s.code != missing);
+        assert!(adapt(&absent).is_err());
+    }
+}
+
+#[test]
+fn ingredient_failures_unknown_codes_categories_and_unsigned_notice_rejected() {
+    let e = with_known_ingredient_notice();
+    let mut unknown = e.clone();
+    unknown.ingredient_informational[0].code = "ingredient.future".into();
+    assert!(adapt(&unknown).is_err());
+    let mut failed = e.clone();
+    failed
+        .ingredient_failure
+        .push(failed.ingredient_informational.remove(0));
+    assert!(adapt(&failed).is_err());
+    let mut wrong_category = e.clone();
+    wrong_category
+        .ingredient_success
+        .push(wrong_category.ingredient_informational.remove(0));
+    assert!(adapt(&wrong_category).is_err());
+    let mut unsigned = e.clone();
+    unsigned.references.pop();
+    assert!(adapt(&unsigned).is_err());
+    let mut other = e.clone();
+    other.ingredient_informational[0].url =
+        Some("self#jumbf=/c2pa/other/c2pa.assertions/c2pa.ingredient.v3".into());
+    assert!(adapt(&other).is_err());
+    let mut no_url = e;
+    no_url.ingredient_informational[0].url = None;
+    assert!(adapt(&no_url).is_err());
+}
+
 #[test]
 fn legacy_validation_status_cannot_be_silently_accepted() {
     rejects(|e| {
