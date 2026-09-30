@@ -4,6 +4,9 @@ compile_error!("the manual-canary feature is DEVELOPMENT CANARY only and must no
 #[cfg(test)]
 mod asset_stage;
 mod host;
+// Parallel host-owned inspection boundary; not exposed as a Tauri command.
+pub mod inspection_protocol;
+pub mod inspection_supervisor;
 mod protocol;
 
 use host::BridgeHost;

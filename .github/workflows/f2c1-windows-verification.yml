@@ -133,33 +133,34 @@ jobs:
           cargo fetch --locked --manifest-path desktop\Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test Desktop default suites including BridgeHost offline
+      - name: Test Desktop default library regressions including BridgeHost offline
         id: desktop_default
         if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
-          cargo test --locked --offline --manifest-path desktop\Cargo.toml -- --nocapture
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml --lib -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test Desktop manual-canary suites including Personal Mark offline
+      - name: Test Desktop manual-canary library and Personal Mark regressions offline
         id: desktop_manual
         if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
-          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml -- --nocapture
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --lib -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Require inspection-supervisor integration coverage
+      - name: Test inspection-supervisor integration in both configurations
         id: inspection_coverage
         if: inputs.desktop_inspection_scope != 'workspace_cleanup_diagnostic'
         shell: pwsh
         run: |
-          # Full cargo test above automatically runs this integration target in
-          # both configurations when present. Missing coverage is never a PASS.
           if (-not (Test-Path -LiteralPath desktop/tests/inspection_supervisor.rs -PathType Leaf)) {
             throw "INSPECTION_SUPERVISOR_TEST_TARGET_MISSING"
           }
-          'Inspection-supervisor integration target was included in both full Rust suites.'
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Diagnose exact failed Workspace test serially
         id: cleanup_isolated
@@ -216,11 +217,13 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $requestedTests = 'Requested tests: Desktop default + manual-canary full Rust suites; inspection-supervisor integration target; existing BridgeHost/Personal Mark Rust regressions.'
+          $requestedTests = 'Requested targets: Desktop --lib (default); Desktop --lib (manual-canary); --test inspection_supervisor (default + manual-canary). Existing BridgeHost/Personal Mark/navigation regressions remain included.'
           $bridgeFixture = 'BridgeHost fixture: dependency-free CPython test venv only; F3A runtime reconstruction = NOT RUN.'
+          $parkedTests = 'parked limited-canary binary tests = NOT RUN BY THIS MODE (adapter scope); retained in their dedicated F3A gates.'
           if ('${{ inputs.desktop_inspection_scope }}' -eq 'workspace_cleanup_diagnostic') {
             $requestedTests = 'Requested tests: exact failed test serially; entire limited-runner bin serially; at most three separate normal-parallel full-bin comparisons after serial PASS.'
             $bridgeFixture = 'BridgeHost fixture preparation = NOT RUN; Python runtime reconstruction = NOT RUN.'
+            $parkedTests = 'parked limited-canary binary tests = RUN only by this explicitly selected frozen cleanup diagnostic; no allocator or cleanup fix.'
           }
           $summary = @(
             '# DESKTOP_INSPECTION_ONLY',
@@ -230,13 +233,14 @@ jobs:
             "Mode validation: ${{ steps.mode.outcome }}",
             "Desktop default tests: ${{ steps.desktop_default.outcome }}",
             "Desktop manual-canary tests: ${{ steps.desktop_manual.outcome }}",
-            "Required inspection-supervisor target: ${{ steps.inspection_coverage.outcome }}",
+            "Inspection-supervisor integration (default + manual-canary): ${{ steps.inspection_coverage.outcome }}",
             "Workspace isolated serial diagnostic: ${{ steps.cleanup_isolated.outcome }}",
             "Workspace full-bin serial diagnostic: ${{ steps.cleanup_serial.outcome }}",
             "Workspace bounded parallel diagnostic: ${{ steps.cleanup_parallel.outcome }}",
             "Parallel comparison exit codes: $env:WORKSPACE_PARALLEL_1_EXIT / $env:WORKSPACE_PARALLEL_2_EXIT / $env:WORKSPACE_PARALLEL_3_EXIT",
             "Frozen-input recheck: ${{ steps.preservation.outcome }}",
             'Missing or skipped inspection-supervisor tests are NOT a PASS.',
+            $parkedTests,
             'Cleanup diagnostic does not implement or verify the Desktop adapter. Serial/parallel comparison is not direct pathname-reuse evidence.',
             $bridgeFixture,
             'package generation = NOT RUN',
