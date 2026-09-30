@@ -157,6 +157,11 @@ class F3AModeIsolationTests(unittest.TestCase):
         for required in ("verify_f3a_ci_runtime.py fetch", "prepare_f3a_limited_runtime.py", "verify_f3a_ci_runtime.py assemble", "verify_f3a_ci_runtime.py prove", "--locked --offline", "native-proof.json"):
             self.assertIn(required, job)
 
+    def test_target_path_is_set_in_step_not_invalid_job_context(self):
+        job = self.job("f3a_runtime")
+        self.assertNotIn("runner.temp", job.split("    steps:\n", 1)[0])
+        self.assertIn("CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runtime-target')", job)
+
     def test_immutable_dependency_inputs_have_exact_byte_attributes(self):
         attributes = (PROJECT / ".gitattributes").read_text(encoding="utf-8").splitlines()
         for path in ("packaging/f3a-limited-runtime-lock.json", "packaging/f3a-limited-requirements.txt"):

@@ -102,7 +102,6 @@ jobs:
     timeout-minutes: 60
     env:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: ${{ runner.temp }}/f3a-runtime-target
       EVIDENCE_SHA: ${{ github.sha }}
     steps:
       - name: Assert exclusive proof mode
@@ -143,6 +142,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "F3A_TOOL_PYTHON=$toolPython" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           "F3A_GATE_ROOT=$gateRoot" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runtime-target')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           $sourceSha = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($sourceSha -ne $env:EVIDENCE_SHA) { throw "Tested source SHA mismatch" }
