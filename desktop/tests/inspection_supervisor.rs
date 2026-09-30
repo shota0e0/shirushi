@@ -464,6 +464,10 @@ mod process {
         cleaned(&r);
         if r.outcome == HelperOutcome::Failure(ServiceFailure::Timeout) {
             assert!(r.pre_cleanup_wait_state.is_some(), "{r:?}");
+            if let Some(state) = r.pre_cleanup_wait_state {
+                assert!(!state.stdout_done || state.stdout_reader_finished, "{r:?}");
+                assert!(!state.stderr_done || state.stderr_reader_finished, "{r:?}");
+            }
         }
         assert_eq!(
             r.outcome,

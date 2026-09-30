@@ -17,6 +17,11 @@ on:
           - adapter
           - workspace_cleanup_diagnostic
           - descendant_cleanup_diagnostic
+      descendant_isolated_only:
+        description: "Descendant diagnostic scope only: exactly one isolated test, never full target"
+        type: boolean
+        required: false
+        default: false
       first_rust_only:
         description: "Run only the F3A first Rust-test gate; no runtime, package or upload"
         type: boolean
@@ -64,6 +69,9 @@ jobs:
         run: |
           if ("${{ inputs.first_rust_only }}" -eq "true" -or "${{ inputs.f3a_runtime_reproduction }}" -eq "true" -or "${{ inputs.f3a_runner_transport }}" -eq "true" -or "${{ inputs.f3a_source_identity_only }}" -eq "true") {
             throw "DESKTOP_INSPECTION_MODE_CONFLICT"
+          }
+          if ("${{ inputs.descendant_isolated_only }}" -eq "true" -and "${{ inputs.desktop_inspection_scope }}" -ne "descendant_cleanup_diagnostic") {
+            throw "DESCENDANT_ISOLATED_SCOPE_REQUIRED"
           }
 
       - name: Check out exact Desktop test source
@@ -169,7 +177,9 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
+          $maxAttempts = 3
+          if ("${{ inputs.descendant_isolated_only }}" -eq "true") { $maxAttempts = 1 }
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             "DESCENDANT_ISOLATED_${attempt}_BEGIN"
             cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor process::descendant_cleanup_failure_supersedes_valid_response -- --exact --nocapture
             $code = $LASTEXITCODE
@@ -180,7 +190,7 @@ jobs:
 
       - name: Run default supervisor target only after all isolated passes
         id: descendant_full
-        if: inputs.desktop_inspection_scope == 'descendant_cleanup_diagnostic' && steps.descendant_isolated.outcome == 'success'
+        if: inputs.desktop_inspection_scope == 'descendant_cleanup_diagnostic' && steps.descendant_isolated.outcome == 'success' && inputs.descendant_isolated_only != true
         shell: pwsh
         run: |
           cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
@@ -253,6 +263,9 @@ jobs:
             $requestedTests = 'Requested tests: exact default descendant cleanup test; at most three total isolated executions, stop on first failure; full default inspection_supervisor once only after all isolated PASS. Manual-canary integration = NOT RUN.'
             $bridgeFixture = 'BridgeHost fixture preparation = NOT RUN; Python runtime reconstruction = NOT RUN.'
             $parkedTests = 'parked limited-canary binary tests = NOT RUN BY THIS DIAGNOSTIC.'
+            if ('${{ inputs.descendant_isolated_only }}' -eq 'true') {
+              $requestedTests = 'Requested tests: exactly one isolated default descendant diagnostic; no additional attempts. Full inspection_supervisor target and manual-canary integration = NOT RUN.'
+            }
           }
           $summary = @(
             '# DESKTOP_INSPECTION_ONLY',
@@ -280,6 +293,17 @@ jobs:
             'ARTIFACT_UPLOAD_COUNT: 0',
             'Production adoption UNAPPROVED; Production Signing PARKED; Distribution Compliance NOT READY; Full F3A NOT READY.'
           )
+          if ('${{ inputs.desktop_inspection_scope }}' -eq 'descendant_cleanup_diagnostic' -and '${{ inputs.descendant_isolated_only }}' -eq 'true') {
+            $isolatedExecution = 'NOT RUN'
+            if ($env:DESCENDANT_ISOLATED_ATTEMPTS -eq '1') { $isolatedExecution = 'RUN' }
+            $summary += @(
+              'descendant_isolated_only = true',
+              "isolated descendant diagnostic = $isolatedExecution",
+              'full inspection_supervisor target = NOT RUN',
+              'artifact upload = NOT RUN',
+              'ARTIFACT_UPLOAD_COUNT = 0'
+            )
+          }
           $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
   first_rust:

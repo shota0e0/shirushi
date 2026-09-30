@@ -112,6 +112,9 @@ pub struct PreCleanupWaitState {
     pub stderr_done: bool,
     pub stdin_done: bool,
     pub parent_exit_seen: bool,
+    /// Bounded read returned and reached its pre-send marker; not proof of EOF.
+    pub stdout_reader_finished: bool,
+    pub stderr_reader_finished: bool,
 }
 
 #[derive(Debug)]
@@ -222,7 +225,10 @@ mod windows {
         path::Path,
         process::{Child, Command, Stdio},
         ptr::{null, null_mut},
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         thread,
         time::Instant,
     };
@@ -549,21 +555,25 @@ mod windows {
         let mut stdin = child.stdin.take().unwrap();
         let out_tx = tx.clone();
         let err_tx = tx.clone();
+        let stdout_reader_finished = Arc::new(AtomicBool::new(false));
+        let stderr_reader_finished = Arc::new(AtomicBool::new(false));
+        let out_finished = Arc::clone(&stdout_reader_finished);
+        let err_finished = Arc::clone(&stderr_reader_finished);
         let bytes = raw.to_vec();
         let mut threads = Vec::with_capacity(3);
         // Fallible OS worker creation: an error drops the unused captured pipe
         // handles and routes partial startup through the same cleanup proof.
         let workers = (|| {
             threads.push(thread::Builder::new().spawn(move || {
-                let _ = out_tx.send(Io::Out(helper_protocol::read_bounded(
-                    &mut stdout,
-                    MAX_RESPONSE_BYTES,
-                )));
+                let result = helper_protocol::read_bounded(&mut stdout, MAX_RESPONSE_BYTES);
+                out_finished.store(true, Ordering::Release);
+                let _ = out_tx.send(Io::Out(result));
             })?);
             threads.push(thread::Builder::new().spawn(move || {
-                let _ = err_tx.send(Io::Err(
-                    helper_protocol::read_bounded(&mut stderr, MAX_STDERR_BYTES).map(|v| v.len()),
-                ));
+                let result =
+                    helper_protocol::read_bounded(&mut stderr, MAX_STDERR_BYTES).map(|v| v.len());
+                err_finished.store(true, Ordering::Release);
+                let _ = err_tx.send(Io::Err(result));
             })?);
             threads.push(thread::Builder::new().spawn(move || {
                 let _ = tx.send(Io::In(stdin.write_all(&bytes).is_ok()));
@@ -606,6 +616,8 @@ mod windows {
                         stderr_done: err_done,
                         stdin_done: in_done,
                         parent_exit_seen: exit.is_some(),
+                        stdout_reader_finished: stdout_reader_finished.load(Ordering::Acquire),
+                        stderr_reader_finished: stderr_reader_finished.load(Ordering::Acquire),
                     });
                     Some(ServiceFailure::Timeout)
                 } else {
