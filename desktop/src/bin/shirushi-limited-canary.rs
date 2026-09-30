@@ -115,6 +115,43 @@ mod runner {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ChildRole {
+        C2patool,
+        Python,
+        Venv,
+    }
+    impl ChildRole {
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::C2patool => "c2patool",
+                Self::Python => "python",
+                Self::Venv => "venv",
+            }
+        }
+    }
+    fn spawn_diagnostic(role: ChildRole, raw_os_error: Option<i32>) -> String {
+        let native = raw_os_error.map_or_else(|| "unavailable".to_owned(), |code| code.to_string());
+        // Closed role/stage and an i32 (or fixed literal): at most 62 ASCII bytes.
+        format!(
+            "SPAWN_DIAG role={} stage=spawn raw_os_error={}\n",
+            role.as_str(),
+            native
+        )
+    }
+    fn diagnose_spawn<T>(
+        outcome: io::Result<T>,
+        role: ChildRole,
+        spawn_code: &'static str,
+        stderr: &mut impl Write,
+    ) -> Result<T> {
+        outcome.map_err(|error| {
+            // Diagnostics must not mask the original failure, even if stderr fails.
+            let _ = stderr.write_all(spawn_diagnostic(role, error.raw_os_error()).as_bytes());
+            policy_or(spawn_code, "fixed child process could not start", &error)
+        })
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Action {
         Prepare,
@@ -669,6 +706,7 @@ mod runner {
     }
     fn run_contained(
         command: &mut Command,
+        role: ChildRole,
         timeout: Duration,
         spawn_code: &'static str,
         timeout_code: &'static str,
@@ -679,9 +717,7 @@ mod runner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|error| {
-            policy_or(spawn_code, "fixed child process could not start", &error)
-        })?;
+        let mut child = diagnose_spawn(command.spawn(), role, spawn_code, &mut io::stderr())?;
         if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } == 0 {
             let _ = child.kill();
             let _ = child.wait();
@@ -860,6 +896,7 @@ mod runner {
         command.args(["-I", "-B", "-S", "-c", IDENTITY_CODE]);
         let output = run_contained(
             &mut command,
+            ChildRole::Python,
             IDENTITY_TIMEOUT,
             "RUNTIME_UNAVAILABLE",
             "RUNTIME_UNAVAILABLE",
@@ -1241,6 +1278,7 @@ mod runner {
             .arg(root.join(RUNTIME_ROOT));
         let output = run_contained(
             &mut command,
+            ChildRole::Venv,
             PREPARE_TIMEOUT,
             "PREPARE_FAILED",
             "PREPARE_FAILED",
@@ -1440,6 +1478,7 @@ mod runner {
         version.arg("--version");
         let output = run_contained(
             &mut version,
+            ChildRole::C2patool,
             IDENTITY_TIMEOUT,
             "RUNTIME_UNAVAILABLE",
             "RUNTIME_UNAVAILABLE",
@@ -1460,6 +1499,7 @@ mod runner {
         command.args(["-I", "-B", "-S"]).arg(root.join(SCRIPT));
         let output = run_contained(
             &mut command,
+            ChildRole::Python,
             INSPECT_TIMEOUT,
             "RUNTIME_UNAVAILABLE",
             "INSPECTION_FAILED",
@@ -1558,6 +1598,176 @@ mod runner {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn spawn_diagnostic_formats_each_closed_role() {
+            for (role, name) in [
+                (ChildRole::C2patool, "c2patool"),
+                (ChildRole::Python, "python"),
+                (ChildRole::Venv, "venv"),
+            ] {
+                assert_eq!(
+                    spawn_diagnostic(role, Some(4551)),
+                    format!("SPAWN_DIAG role={name} stage=spawn raw_os_error=4551\n")
+                );
+            }
+        }
+        #[test]
+        fn spawn_diagnostic_preserves_native_values_and_stays_bounded() {
+            for role in [ChildRole::C2patool, ChildRole::Python, ChildRole::Venv] {
+                for native in [i32::MIN, -1, 0, 1260, 4551, i32::MAX] {
+                    let error = io::Error::from_raw_os_error(native);
+                    let mut stderr = Vec::new();
+                    let _ =
+                        diagnose_spawn::<()>(Err(error), role, "RUNTIME_UNAVAILABLE", &mut stderr);
+                    let line = String::from_utf8(stderr).unwrap();
+                    assert!(line.ends_with(&format!("raw_os_error={native}\n")));
+                    assert!(line.is_ascii());
+                    assert!(line.len() <= 62);
+                    assert_eq!(line.bytes().filter(|byte| *byte == b'\n').count(), 1);
+                    assert!(!line.contains('\r'));
+                }
+            }
+        }
+        #[test]
+        fn spawn_diagnostic_unavailable_never_serializes_private_error_text() {
+            let private = "C:\\Users\\private\\python.exe --secret-token PRIVATE_ARGS; \
+                           CWD=PRIVATE_CWD HOME=PRIVATE_HOME USER=PRIVATE_USER MACHINE=PRIVATE_MACHINE\n";
+            for role in [ChildRole::C2patool, ChildRole::Python, ChildRole::Venv] {
+                let error = io::Error::new(io::ErrorKind::Other, private);
+                let mut stderr = Vec::new();
+                let _ = diagnose_spawn::<()>(Err(error), role, "RUNTIME_UNAVAILABLE", &mut stderr);
+                assert_eq!(
+                    stderr,
+                    format!(
+                        "SPAWN_DIAG role={} stage=spawn raw_os_error=unavailable\n",
+                        role.as_str()
+                    )
+                    .into_bytes()
+                );
+                assert!(stderr.is_ascii());
+                assert!(stderr.len() <= 62);
+            }
+        }
+        #[test]
+        fn spawn_diagnostic_unknown_errors_keep_existing_failure_and_exit_contract() {
+            for role in [ChildRole::C2patool, ChildRole::Python, ChildRole::Venv] {
+                for native in [2, 5, 193, 4551, i32::MIN] {
+                    for (code, exit) in [("RUNTIME_UNAVAILABLE", 12), ("PREPARE_FAILED", 11)] {
+                        let mut stderr = Vec::new();
+                        let failure = diagnose_spawn::<()>(
+                            Err(io::Error::from_raw_os_error(native)),
+                            role,
+                            code,
+                            &mut stderr,
+                        )
+                        .unwrap_err();
+                        assert_eq!(
+                            failure,
+                            Failure::new(code, "fixed child process could not start")
+                        );
+                        assert_eq!(exit_code(failure), exit);
+                        let value: serde_json::Value =
+                            serde_json::from_str(&failure_json(failure)).unwrap();
+                        assert_eq!(
+                            value,
+                            serde_json::json!({"contractVersion":2,
+                            "operation":"limited_c2pa_cawg_inspection",
+                            "result":"INSPECTION_FAILED","error":{"code":code}})
+                        );
+                        assert_eq!(stderr, spawn_diagnostic(role, Some(native)).into_bytes());
+                    }
+                }
+            }
+        }
+        #[test]
+        fn spawn_diagnostic_1260_preserves_policy_classification() {
+            for role in [ChildRole::C2patool, ChildRole::Python, ChildRole::Venv] {
+                let mut stderr = Vec::new();
+                let failure = diagnose_spawn::<()>(
+                    Err(io::Error::from_raw_os_error(1260)),
+                    role,
+                    "PREPARE_FAILED",
+                    &mut stderr,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    failure,
+                    Failure::new(
+                        "LOCAL_POLICY_BLOCKED",
+                        "Windows explicitly rejected a fixed child executable"
+                    )
+                );
+                assert_eq!(exit_code(failure), 12);
+                assert_eq!(stderr, spawn_diagnostic(role, Some(1260)).into_bytes());
+            }
+        }
+        #[test]
+        fn successful_spawn_result_has_no_diagnostic() {
+            for role in [ChildRole::C2patool, ChildRole::Python, ChildRole::Venv] {
+                let mut stderr = Vec::new();
+                assert_eq!(
+                    diagnose_spawn(Ok(7), role, "RUNTIME_UNAVAILABLE", &mut stderr),
+                    Ok(7)
+                );
+                assert!(stderr.is_empty());
+            }
+        }
+        #[test]
+        fn diagnostic_write_failure_never_masks_spawn_failure() {
+            struct RejectWrite(usize);
+            impl Write for RejectWrite {
+                fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                    self.0 += 1;
+                    Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "private diagnostic sink",
+                    ))
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+            let mut stderr = RejectWrite(0);
+            assert_eq!(
+                diagnose_spawn(Ok(7), ChildRole::Python, "RUNTIME_UNAVAILABLE", &mut stderr),
+                Ok(7)
+            );
+            assert_eq!(stderr.0, 0);
+            let failure = diagnose_spawn::<()>(
+                Err(io::Error::from_raw_os_error(4551)),
+                ChildRole::C2patool,
+                "RUNTIME_UNAVAILABLE",
+                &mut stderr,
+            )
+            .unwrap_err();
+            assert_eq!(stderr.0, 1);
+            assert_eq!(
+                failure,
+                Failure::new("RUNTIME_UNAVAILABLE", "fixed child process could not start")
+            );
+        }
+        #[test]
+        fn cleanup_failure_still_takes_precedence_over_diagnosed_spawn_failure() {
+            let failure = diagnose_spawn::<()>(
+                Err(io::Error::from_raw_os_error(4551)),
+                ChildRole::C2patool,
+                "RUNTIME_UNAVAILABLE",
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            for code in [
+                "CLEANUP_FAILED",
+                "JOB_CONTAINMENT_FAILED",
+                "ORPHAN_PROCESS_DETECTED",
+            ] {
+                let cleanup = Failure::new(code, "fixed cleanup failure");
+                assert_eq!(
+                    after_cleanup::<()>(Err(failure), Err(cleanup)),
+                    Err(cleanup)
+                );
+                assert_eq!(exit_code(cleanup), 15);
+            }
+        }
         fn positive() -> serde_json::Value {
             serde_json::json!({"contractVersion":OUTER_CONTRACT_VERSION,"operation":"limited_c2pa_cawg_inspection",
                 "result":"LIMITED_INSPECTION","completeness":"INCOMPLETE",
