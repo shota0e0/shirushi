@@ -18,6 +18,11 @@ on:
         type: boolean
         required: false
         default: false
+      f3a_source_identity_only:
+        description: "Diagnostic ONLY: raw Git blob versus checkout bytes; no tests/build/upload"
+        type: boolean
+        required: false
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -32,7 +37,7 @@ concurrency:
 jobs:
   first_rust:
     name: F3A First Rust-test Gate only
-    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true && inputs.f3a_runner_transport != true
+    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -102,7 +107,7 @@ jobs:
 
   f3a_runtime:
     name: F3A independent Candidate B runtime reproduction
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true && inputs.f3a_runner_transport != true
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 60
     env:
@@ -257,7 +262,7 @@ jobs:
 
   f3a_runner_transport:
     name: F3A development runner-only transport
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runner_transport == true
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runner_transport == true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -377,9 +382,119 @@ jobs:
           include-hidden-files: false
           overwrite: false
 
+  f3a_source_identity:
+    name: F3A source byte identity diagnostics ONLY
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_source_identity_only == true
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      APPROVED_SOURCE_SHA: 0bea483d650cf89716ace0bd0589c60e7eb14b56
+      APPROVED_RUNNER_SHA256: 9482fe89345af3d8b856131cac84668536e0efef938ab8acfc98640f7f0aab1b
+      APPROVED_LOCK_SHA256: e9c45a2ec307189e0cab2af7712244f9bd2353e1389e5b6dc608fcd9aeb4f4fc
+      WORKFLOW_SHA: ${{ github.sha }}
+    steps:
+      - name: Reject non-diagnostic mode flags
+        shell: pwsh
+        run: |
+          if ("${{ inputs.first_rust_only }}" -eq "true" -or "${{ inputs.f3a_runtime_reproduction }}" -eq "true" -or "${{ inputs.f3a_runner_transport }}" -eq "true") {
+            throw "Source identity diagnostics cannot run another mode"
+          }
+
+      - name: Reproduce the exact prior runner checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Report raw blob and checkout identities without changing bytes
+        shell: pwsh
+        run: |
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceSha -ne $env:APPROVED_SOURCE_SHA) { throw "Approved source revision mismatch" }
+          function Read-RawGitBlob([string]$oid) {
+            if ($oid -notmatch '^[0-9a-f]{40}$') { throw "Unexpected blob OID" }
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = 'git'
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($arg in @('cat-file', 'blob', $oid)) { $start.ArgumentList.Add($arg) }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            $buffer = [IO.MemoryStream]::new()
+            try {
+              if (-not $process.Start()) { throw "Git blob reader did not start" }
+              $errorRead = $process.StandardError.ReadToEndAsync()
+              $process.StandardOutput.BaseStream.CopyTo($buffer)
+              $process.WaitForExit()
+              $null = $errorRead.GetAwaiter().GetResult()
+              if ($process.ExitCode -ne 0) { throw "Git blob reader failed" }
+              return ,$buffer.ToArray()
+            } finally { $buffer.Dispose(); $process.Dispose() }
+          }
+          function Measure-Bytes([byte[]]$bytes) {
+            $lf = 0; $crlf = 0; $cr = 0
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+              if ($bytes[$i] -eq 10) { $lf++; if ($i -gt 0 -and $bytes[$i - 1] -eq 13) { $crlf++ } }
+              if ($bytes[$i] -eq 13) { $cr++ }
+            }
+            $bareLf = $lf - $crlf; $loneCr = $cr - $crlf
+            $eol = if ($lf -eq 0 -and $cr -eq 0) { 'NONE' } elseif ($crlf -gt 0 -and $bareLf -eq 0 -and $loneCr -eq 0) { 'CRLF' } elseif ($bareLf -gt 0 -and $cr -eq 0) { 'LF' } else { 'MIXED' }
+            return [ordered]@{ sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant(); bytes = $bytes.Length; eol = $eol; lf_count = $lf; crlf_count = $crlf; bare_lf_count = $bareLf; lone_cr_count = $loneCr }
+          }
+          function Equal-RawBytes([byte[]]$left, [byte[]]$right) {
+            if ($left.Length -ne $right.Length) { return $false }
+            for ($i = 0; $i -lt $left.Length; $i++) { if ($left[$i] -ne $right[$i]) { return $false } }
+            return $true
+          }
+          function Equal-ExceptEol([byte[]]$left, [byte[]]$right) {
+            # Diagnostic comparison AFTER raw hashes. No normalized bytes are hashed or accepted.
+            $i = 0; $j = 0
+            while ($i -lt $left.Length -and $j -lt $right.Length) {
+              if ($left[$i] -eq 13 -and $i + 1 -lt $left.Length -and $left[$i + 1] -eq 10) { $i++ }
+              if ($right[$j] -eq 13 -and $j + 1 -lt $right.Length -and $right[$j + 1] -eq 10) { $j++ }
+              if ($left[$i] -ne $right[$j]) { return $false }
+              $i++; $j++
+            }
+            return ($i -eq $left.Length -and $j -eq $right.Length)
+          }
+          $paths = @('desktop/Cargo.lock', 'desktop/src/bin/shirushi-limited-canary.rs')
+          $expected = @{ 'desktop/Cargo.lock' = $env:APPROVED_LOCK_SHA256; 'desktop/src/bin/shirushi-limited-canary.rs' = $env:APPROVED_RUNNER_SHA256 }
+          $rows = @()
+          foreach ($path in $paths) {
+            $oid = git rev-parse "${sourceSha}:$path"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $objectType = git cat-file -t $oid
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($objectType -ne 'blob') { throw "Expected Git blob object" }
+            [byte[]]$blobBytes = Read-RawGitBlob $oid
+            [byte[]]$checkoutBytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location).Path $path))
+            $blobFacts = Measure-Bytes $blobBytes
+            $checkoutFacts = Measure-Bytes $checkoutBytes
+            $eolListing = git ls-files --eol -- $path
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $attributes = @(git check-attr text eol working-tree-encoding -- $path)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $rows += [ordered]@{ path = $path; source_commit = $sourceSha; blob_oid = $oid; git_blob = $blobFacts; ci_checkout = $checkoutFacts; approved_gate_sha256 = $expected[$path]; checkout_matches_approved = ($checkoutFacts.sha256 -eq $expected[$path]); blob_checkout_raw_equal = (Equal-RawBytes $blobBytes $checkoutBytes); content_equal_except_eol = (Equal-ExceptEol $blobBytes $checkoutBytes); eol_listing = $eolListing; attributes = $attributes }
+          }
+          $config = [ordered]@{}
+          foreach ($key in @('core.autocrlf', 'core.eol', 'core.safecrlf')) {
+            $value = git config --get $key
+            if ($LASTEXITCODE -gt 1) { throw "Git EOL configuration query failed" }
+            $config[$key] = if ($LASTEXITCODE -eq 1) { 'UNSET' } else { "$value" }
+          }
+          $gitVersion = git --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = [ordered]@{ purpose = 'SOURCE_BYTE_IDENTITY_DIAGNOSTIC_ONLY'; prior_run = 36670510833; workflow_commit = $env:WORKFLOW_SHA; source_commit = $sourceSha; git_version = $gitVersion; hosted_image_os = $env:ImageOS; hosted_image_version = $env:ImageVersion; git_eol_configuration = $config; paths = $rows; build = 'NOT_RUN'; upload = 'NOT_RUN'; approved_hashes = 'UNCHANGED' }
+          'SOURCE_BYTE_IDENTITY_JSON_BEGIN'
+          $report | ConvertTo-Json -Depth 8
+          'SOURCE_BYTE_IDENTITY_JSON_END'
+          # A diagnostic reports mismatches; it never authorizes a build or accepts new hashes.
+
   verify:
     name: Frozen F2C.1 source verification
-    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && inputs.f3a_runner_transport != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-2025
     timeout-minutes: 60
     env:
