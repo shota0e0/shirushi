@@ -812,19 +812,15 @@ mod process {
             println!("TARGET_HANDLE_CLASSIFICATION: DIAGNOSTIC_INSUFFICIENT");
         }
         cleaned(&r);
-        if r.outcome == HelperOutcome::Failure(ServiceFailure::Timeout) {
-            assert!(r.pre_cleanup_wait_state.is_some(), "{r:?}");
-            if let Some(state) = r.pre_cleanup_wait_state {
-                assert!(!state.stdout_done || state.stdout_reader_finished, "{r:?}");
-                assert!(!state.stderr_done || state.stderr_reader_finished, "{r:?}");
-            }
-        }
+        println!("RESIDUAL_DESCENDANT_REPORT: {r:?}");
+        assert!(r.pre_cleanup_wait_state.is_none(), "{r:?}");
         assert_eq!(
             r.outcome,
             HelperOutcome::Failure(ServiceFailure::CleanupFailed),
             "{r:?}"
         );
-        assert_eq!(r.job_total_processes, Some(2));
+        assert_eq!(r.exit_code, Some(0), "{r:?}");
+        assert!(matches!(r.job_total_processes, Some(n) if n >= 2), "{r:?}");
     }
     #[test]
     fn completed_identity_cannot_be_published_twice() {

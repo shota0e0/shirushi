@@ -661,6 +661,24 @@ mod windows {
                         terminal = Some(ServiceFailure::ServiceUnavailable);
                         break;
                     }
+                    // One request owns one helper and one dedicated Job. A
+                    // normally exited parent must not leave runtime children.
+                    // Detect this before awaiting EOF: a residual descendant
+                    // may still hold the stdout/stderr write handles open.
+                    let remaining = active(&job);
+                    // Cancellation/deadline reached while observing exit/Job
+                    // state keeps its existing terminal classification. Return
+                    // to the top-level check (including its timeout snapshot).
+                    if control.failure(id, _lease.epoch).is_some() || start.elapsed() >= deadline {
+                        continue;
+                    }
+                    if !matches!(remaining, Ok(0)) {
+                        // Positive residual count or an unprovable Job state:
+                        // terminate/drain, reap and join via bounded cleanup.
+                        // Successful draining must not erase this failure.
+                        terminal = Some(ServiceFailure::CleanupFailed);
+                        break;
+                    }
                 }
                 Ok(None) => {}
                 Err(_) => {

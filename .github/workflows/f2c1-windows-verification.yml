@@ -142,6 +142,27 @@ jobs:
           cargo fetch --locked --manifest-path desktop\Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Prove exact residual-descendant regression before adapter suites
+        id: descendant_regression
+        if: inputs.desktop_inspection_scope == 'adapter'
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor process::descendant_cleanup_failure_supersedes_valid_response -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test inspection-supervisor integration in both configurations
+        id: inspection_coverage
+        if: inputs.desktop_inspection_scope == 'adapter'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath desktop/tests/inspection_supervisor.rs -PathType Leaf)) {
+            throw "INSPECTION_SUPERVISOR_TEST_TARGET_MISSING"
+          }
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test Desktop default library regressions including BridgeHost offline
         id: desktop_default
         if: inputs.desktop_inspection_scope == 'adapter'
@@ -156,19 +177,6 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --lib -- --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Test inspection-supervisor integration in both configurations
-        id: inspection_coverage
-        if: inputs.desktop_inspection_scope == 'adapter'
-        shell: pwsh
-        run: |
-          if (-not (Test-Path -LiteralPath desktop/tests/inspection_supervisor.rs -PathType Leaf)) {
-            throw "INSPECTION_SUPERVISOR_TEST_TARGET_MISSING"
-          }
-          cargo test --locked --offline --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml --test inspection_supervisor -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Attribute exact descendant cleanup test with at most three executions
@@ -251,7 +259,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $requestedTests = 'Requested targets: Desktop --lib (default); Desktop --lib (manual-canary); --test inspection_supervisor (default + manual-canary). Existing BridgeHost/Personal Mark/navigation regressions remain included.'
+          $requestedTests = 'Requested order: exact residual-descendant regression (default); --test inspection_supervisor (default then manual-canary); Desktop --lib (default then manual-canary). Stop on any failure. Existing BridgeHost/Personal Mark/navigation regressions remain included.'
           $bridgeFixture = 'BridgeHost fixture: dependency-free CPython test venv only; F3A runtime reconstruction = NOT RUN.'
           $parkedTests = 'parked limited-canary binary tests = NOT RUN BY THIS MODE (adapter scope); retained in their dedicated F3A gates.'
           if ('${{ inputs.desktop_inspection_scope }}' -eq 'workspace_cleanup_diagnostic') {
@@ -273,6 +281,7 @@ jobs:
             "Desktop-only scope: ${{ inputs.desktop_inspection_scope }}",
             $requestedTests,
             "Mode validation: ${{ steps.mode.outcome }}",
+            "Exact residual-descendant regression: ${{ steps.descendant_regression.outcome }}",
             "Desktop default tests: ${{ steps.desktop_default.outcome }}",
             "Desktop manual-canary tests: ${{ steps.desktop_manual.outcome }}",
             "Inspection-supervisor integration (default + manual-canary): ${{ steps.inspection_coverage.outcome }}",
