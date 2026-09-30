@@ -1,0 +1,589 @@
+//! Isolated development supervisor, not a Production sandbox or Tauri adapter.
+//! Explicit deadlines are caller/test values; Production remains BENCHMARK_REQUIRED.
+use crate::{
+    helper_protocol::{
+        self, HelperOutcome, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_STDERR_BYTES,
+    },
+    service::{RequestIdentity, ServiceFailure, TerminalState},
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[derive(Clone)]
+pub struct Control(Arc<Mutex<ControlState>>);
+struct ControlState {
+    current: RequestIdentity,
+    cancelled: bool,
+}
+impl Control {
+    pub fn new(id: RequestIdentity) -> Self {
+        Self(Arc::new(Mutex::new(ControlState {
+            current: id,
+            cancelled: false,
+        })))
+    }
+    pub fn cancel(&self) {
+        if let Ok(mut c) = self.0.lock() {
+            c.cancelled = true;
+        }
+    }
+    pub fn set_current(&self, id: RequestIdentity) {
+        if let Ok(mut c) = self.0.lock() {
+            c.current = id;
+        }
+    }
+    fn failure(&self, id: RequestIdentity) -> Option<ServiceFailure> {
+        match self.0.lock() {
+            Ok(c) if c.cancelled => Some(ServiceFailure::Cancelled),
+            Ok(c) if c.current != id => Some(ServiceFailure::ResultInvalid),
+            Ok(_) => None,
+            Err(_) => Some(ServiceFailure::ServiceUnavailable),
+        }
+    }
+}
+#[derive(Debug)]
+pub struct ProcessReport {
+    pub outcome: HelperOutcome,
+    pub reaped: bool,
+    pub job_active_processes: Option<u32>,
+    pub job_total_processes: Option<u32>,
+    pub exit_code: Option<i32>,
+    /// Raw stderr is bounded then discarded, never exposed in diagnostics.
+    pub stderr_bytes: usize,
+}
+/// Cleanup failure always wins over any candidate success, timeout or cancellation.
+pub fn accept_after_cleanup(candidate: HelperOutcome, cleanup_proven: bool) -> HelperOutcome {
+    if cleanup_proven {
+        candidate
+    } else {
+        HelperOutcome::Failure(ServiceFailure::CleanupFailed)
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::{
+        ffi::c_void,
+        io::Write,
+        mem::{size_of, zeroed},
+        os::windows::{io::AsRawHandle, process::CommandExt},
+        path::Path,
+        process::{Child, Command, Stdio},
+        ptr::{null, null_mut},
+        sync::mpsc,
+        thread,
+        time::Instant,
+    };
+
+    // Minimal kernel32 ABI, checked against the already-cached windows-sys0.61.2
+    // generated definitions. No dependency edge, lock change or new build script.
+    // These structs deliberately mirror Win32, not any crate's private ABI.
+    type HandleRaw = *mut c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        process_time: i64,
+        job_time: i64,
+        flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_limit: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io_counters: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process_memory: usize,
+        peak_job_memory: usize,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Accounting {
+        user: i64,
+        kernel: i64,
+        period_user: i64,
+        period_kernel: i64,
+        faults: u32,
+        total: u32,
+        active: u32,
+        terminated: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ThreadEntry {
+        size: u32,
+        usage: u32,
+        thread_id: u32,
+        process_id: u32,
+        base_priority: i32,
+        delta_priority: i32,
+        flags: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> HandleRaw;
+        fn SetInformationJobObject(
+            job: HandleRaw,
+            class: i32,
+            info: *const c_void,
+            size: u32,
+        ) -> i32;
+        fn QueryInformationJobObject(
+            job: HandleRaw,
+            class: i32,
+            info: *mut c_void,
+            size: u32,
+            returned: *mut u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: HandleRaw, process: HandleRaw) -> i32;
+        fn TerminateJobObject(job: HandleRaw, exit: u32) -> i32;
+        fn CloseHandle(handle: HandleRaw) -> i32;
+        fn CreateToolhelp32Snapshot(flags: u32, process: u32) -> HandleRaw;
+        fn Thread32First(snapshot: HandleRaw, entry: *mut ThreadEntry) -> i32;
+        fn Thread32Next(snapshot: HandleRaw, entry: *mut ThreadEntry) -> i32;
+        fn OpenThread(access: u32, inherit: i32, id: u32) -> HandleRaw;
+        fn ResumeThread(thread: HandleRaw) -> u32;
+    }
+    struct Handle(HandleRaw);
+    impl Handle {
+        fn close(mut self) -> bool {
+            let h = self.0;
+            self.0 = null_mut();
+            // SAFETY: uniquely owned valid kernel handle, closed at most once.
+            unsafe { CloseHandle(h) != 0 }
+        }
+    }
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+    fn job() -> Result<Handle, ServiceFailure> {
+        // SAFETY: null means default noninheritable security and unnamed Job.
+        let raw = unsafe { CreateJobObjectW(null(), null()) };
+        if raw.is_null() {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        let job = Handle(raw);
+        let mut limits = ExtendedLimits::default();
+        limits.basic.flags = 0x2000;
+        // SAFETY: exact Win32 extended-limit layout/size, borrowed during call.
+        if unsafe {
+            SetInformationJobObject(
+                raw,
+                9,
+                &limits as *const _ as *const c_void,
+                size_of::<ExtendedLimits>() as u32,
+            )
+        } == 0
+        {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        Ok(job)
+    }
+    fn accounting(job: &Handle) -> Result<Accounting, ServiceFailure> {
+        let mut accounting = Accounting::default();
+        // SAFETY: valid Job, exact writable Win32 accounting buffer.
+        if unsafe {
+            QueryInformationJobObject(
+                job.0,
+                1,
+                &mut accounting as *mut _ as *mut c_void,
+                size_of::<Accounting>() as u32,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(ServiceFailure::CleanupFailed);
+        }
+        Ok(accounting)
+    }
+    fn active(job: &Handle) -> Result<u32, ServiceFailure> {
+        accounting(job).map(|a| a.active)
+    }
+    fn resume(child: &Child) -> Result<(), ServiceFailure> {
+        // std::process does not expose the initial thread handle. Enumerate only
+        // the not-yet-running process's single initial thread, never arbitrary PIDs.
+        let raw = unsafe { CreateToolhelp32Snapshot(4, 0) };
+        if raw == -1isize as HandleRaw || raw.is_null() {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        let snapshot = Handle(raw);
+        let mut row: ThreadEntry = unsafe { zeroed() };
+        row.size = size_of::<ThreadEntry>() as u32;
+        let mut present = unsafe { Thread32First(raw, &mut row) } != 0;
+        let mut found = None;
+        while present {
+            if row.process_id == child.id() {
+                found = Some(row.thread_id);
+                break;
+            }
+            present = unsafe { Thread32Next(raw, &mut row) } != 0;
+        }
+        if !snapshot.close() {
+            return Err(ServiceFailure::CleanupFailed);
+        }
+        let raw = unsafe { OpenThread(2, 0, found.ok_or(ServiceFailure::ServiceUnavailable)?) };
+        if raw.is_null() {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        let thread = Handle(raw);
+        let resumed = unsafe { ResumeThread(raw) };
+        if !thread.close() {
+            return Err(ServiceFailure::CleanupFailed);
+        }
+        // Newly created suspended initial thread must have suspend count exactly1.
+        if resumed != 1 {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        Ok(())
+    }
+
+    enum Io {
+        Out(Result<Vec<u8>, ServiceFailure>),
+        Err(Result<usize, ServiceFailure>),
+        In(bool),
+    }
+    fn join_workers(threads: Vec<thread::JoinHandle<()>>, bound: Duration) -> bool {
+        let start = Instant::now();
+        let mut clean = true;
+        for t in threads {
+            while !t.is_finished() && start.elapsed() < bound {
+                thread::sleep(POLL);
+            }
+            if t.is_finished() {
+                clean &= t.join().is_ok();
+            } else {
+                clean = false;
+            }
+        }
+        clean
+    }
+    const POLL: Duration = Duration::from_millis(5);
+    fn failed(e: ServiceFailure) -> ProcessReport {
+        ProcessReport {
+            outcome: HelperOutcome::Failure(e),
+            reaped: true,
+            job_active_processes: Some(0),
+            job_total_processes: Some(0),
+            exit_code: None,
+            stderr_bytes: 0,
+        }
+    }
+    fn cleanup(
+        child: &mut Child,
+        job: &Handle,
+        terminate: bool,
+        bound: Duration,
+    ) -> (bool, Option<u32>, Option<i32>) {
+        let start = Instant::now();
+        let mut ok = true;
+        if terminate {
+            // SAFETY: contained process tree only; never global process enumeration/kill.
+            ok = unsafe { TerminateJobObject(job.0, 1) } != 0;
+            // A failed assignment leaves a suspended, never-executed child outside
+            // the Job. Child::kill targets its owned handle, no PID reuse lookup.
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+        }
+        let mut reaped = false;
+        let mut exit = None;
+        let mut count = None;
+        loop {
+            match child.try_wait() {
+                Ok(Some(s)) => {
+                    reaped = true;
+                    exit = s.code();
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    ok = false;
+                }
+            }
+            match active(job) {
+                Ok(n) => count = Some(n),
+                Err(_) => {
+                    ok = false;
+                }
+            }
+            if reaped && count == Some(0) {
+                return (ok, count, exit);
+            }
+            if start.elapsed() >= bound {
+                return (false, count, exit);
+            }
+            thread::sleep(POLL);
+        }
+    }
+    /// Exact executable supplied by trusted host/test code, not an IPC argument.
+    /// No shell/CLI passthrough is exposed by the helper itself.
+    pub fn run(
+        command: &mut Command,
+        raw: &[u8],
+        id: RequestIdentity,
+        control: &Control,
+        deadline: Duration,
+        cleanup_bound: Duration,
+    ) -> ProcessReport {
+        let start = Instant::now();
+        if raw.len() > MAX_REQUEST_BYTES {
+            return failed(ServiceFailure::ResourceLimitExceeded);
+        }
+        let job = match job() {
+            Ok(j) => j,
+            Err(e) => return failed(e),
+        };
+        command
+            .creation_flags(0x00000004)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            Err(_) => {
+                return failed(if job.close() {
+                    ServiceFailure::ServiceUnavailable
+                } else {
+                    ServiceFailure::CleanupFailed
+                })
+            }
+        };
+        // SAFETY: live owned child and Job handles; child cannot execute before assignment.
+        let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } != 0;
+        let ready = if assigned {
+            resume(&child)
+        } else {
+            Err(ServiceFailure::ServiceUnavailable)
+        };
+        if let Err(e) = ready {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            let (clean, count, exit) = cleanup(&mut child, &job, true, cleanup_bound);
+            let total = accounting(&job).ok().map(|a| a.total);
+            let clean = job.close() && clean;
+            return ProcessReport {
+                outcome: accept_after_cleanup(HelperOutcome::Failure(e), clean),
+                reaped: child.try_wait().ok().flatten().is_some(),
+                job_active_processes: count,
+                job_total_processes: total,
+                exit_code: exit,
+                stderr_bytes: 0,
+            };
+        }
+        let (tx, rx) = mpsc::channel();
+        // Piped handles are guaranteed by the std spawn contract above.
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let out_tx = tx.clone();
+        let err_tx = tx.clone();
+        let bytes = raw.to_vec();
+        let mut threads = Vec::with_capacity(3);
+        // Fallible OS worker creation: an error drops the unused captured pipe
+        // handles and routes partial startup through the same cleanup proof.
+        let workers = (|| {
+            threads.push(thread::Builder::new().spawn(move || {
+                let _ = out_tx.send(Io::Out(helper_protocol::read_bounded(
+                    &mut stdout,
+                    MAX_RESPONSE_BYTES,
+                )));
+            })?);
+            threads.push(thread::Builder::new().spawn(move || {
+                let _ = err_tx.send(Io::Err(
+                    helper_protocol::read_bounded(&mut stderr, MAX_STDERR_BYTES).map(|v| v.len()),
+                ));
+            })?);
+            threads.push(thread::Builder::new().spawn(move || {
+                let _ = tx.send(Io::In(stdin.write_all(&bytes).is_ok()));
+            })?);
+            Ok::<(), std::io::Error>(())
+        })();
+        if workers.is_err() {
+            let (clean, count, exit) = cleanup(&mut child, &job, true, cleanup_bound);
+            let joined = join_workers(threads, cleanup_bound);
+            let total = accounting(&job).ok().map(|a| a.total);
+            let closed = job.close();
+            return ProcessReport {
+                outcome: accept_after_cleanup(
+                    HelperOutcome::Failure(ServiceFailure::ServiceUnavailable),
+                    clean && joined && total.is_some() && closed,
+                ),
+                reaped: child.try_wait().ok().flatten().is_some(),
+                job_active_processes: count,
+                job_total_processes: total,
+                exit_code: exit,
+                stderr_bytes: 0,
+            };
+        }
+        let mut terminal = TerminalState::new(id);
+        let mut output = None;
+        let mut stderr_bytes = 0;
+        let mut err_done = false;
+        let mut in_done = false;
+        let mut exit = None;
+        loop {
+            // Invalidate before considering any queued/late successful response.
+            let stopped = control
+                .failure(id)
+                .or_else(|| (start.elapsed() >= deadline).then_some(ServiceFailure::Timeout));
+            if let Some(e) = stopped {
+                terminal.fail(id, e);
+                break;
+            }
+            match rx.recv_timeout(POLL) {
+                Ok(Io::Out(Ok(v))) => output = Some(v),
+                Ok(Io::Err(Ok(n))) => {
+                    stderr_bytes = n;
+                    err_done = true;
+                }
+                Ok(Io::In(true)) => in_done = true,
+                Ok(Io::In(false)) => {
+                    terminal.fail(id, ServiceFailure::ServiceUnavailable);
+                    break;
+                }
+                Ok(Io::Out(Err(e))) | Ok(Io::Err(Err(e))) => {
+                    terminal.fail(id, e);
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected)
+                    if output.is_some() && err_done && in_done =>
+                {
+                    thread::sleep(POLL);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    terminal.fail(id, ServiceFailure::ServiceUnavailable);
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            match child.try_wait() {
+                Ok(Some(s)) => {
+                    exit = Some(s.code().unwrap_or(-1));
+                    if !s.success() {
+                        terminal.fail(id, ServiceFailure::ServiceUnavailable);
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    terminal.fail(id, ServiceFailure::ServiceUnavailable);
+                    break;
+                }
+            }
+            if exit.is_some() && output.is_some() && err_done && in_done {
+                break;
+            }
+        }
+        let stop = match terminal.outcome() {
+            Some(crate::service::ServiceOutcome::Failure(e)) => Some(*e),
+            _ => None,
+        };
+        let (mut clean, count, observed_exit) =
+            cleanup(&mut child, &job, stop.is_some(), cleanup_bound);
+        if !clean {
+            // Preserve CLEANUP_FAILED even if fallback termination later succeeds.
+            let _ = cleanup(&mut child, &job, true, cleanup_bound);
+        }
+        clean &= join_workers(threads, cleanup_bound);
+        // Readers may finish just after process exit was observed. Retain only
+        // bounded diagnostics, never publish late output or lose proven overflow.
+        let mut late_overflow = false;
+        for message in rx.try_iter() {
+            match message {
+                Io::Err(Ok(n)) => stderr_bytes = n,
+                Io::Out(Err(ServiceFailure::ResourceLimitExceeded))
+                | Io::Err(Err(ServiceFailure::ResourceLimitExceeded)) => late_overflow = true,
+                _ => {}
+            }
+        }
+        let total = accounting(&job).ok().map(|a| a.total);
+        clean &= total.is_some();
+        clean &= job.close();
+        // Hold the caller-owned control lock across final decision; no late
+        // output can undo cancel/generation invalidation observed before publication.
+        let current = control.0.lock();
+        let invalidated = match &current {
+            Ok(c) if c.cancelled => Some(ServiceFailure::Cancelled),
+            Ok(c) if c.current != id => Some(ServiceFailure::ResultInvalid),
+            Ok(_) if start.elapsed() >= deadline => Some(ServiceFailure::Timeout),
+            Ok(_) => None,
+            Err(_) => Some(ServiceFailure::ServiceUnavailable),
+        };
+        let stop = match stop {
+            Some(ServiceFailure::ServiceUnavailable) if late_overflow => {
+                Some(ServiceFailure::ResourceLimitExceeded)
+            }
+            other => other,
+        };
+        let candidate = if let Some(e) = stop.or(invalidated) {
+            HelperOutcome::Failure(e)
+        } else {
+            helper_protocol::parse_response(
+                output.as_deref().unwrap_or(&[]),
+                id,
+                exit.unwrap_or(-1),
+            )
+            .unwrap_or_else(HelperOutcome::Failure)
+        };
+        ProcessReport {
+            outcome: accept_after_cleanup(candidate, clean),
+            reaped: child.try_wait().ok().flatten().is_some(),
+            job_active_processes: count,
+            job_total_processes: total,
+            exit_code: observed_exit,
+            stderr_bytes,
+        }
+    }
+    pub fn inspect(
+        executable: &Path,
+        input: &Path,
+        id: RequestIdentity,
+        control: &Control,
+        deadline: Duration,
+        cleanup_bound: Duration,
+    ) -> ProcessReport {
+        let raw = match helper_protocol::encode_request(id, input) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        run(
+            &mut Command::new(executable),
+            &raw,
+            id,
+            control,
+            deadline,
+            cleanup_bound,
+        )
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn win32_x64_abi_matches_cached_bindings() {
+            assert_eq!(size_of::<usize>(), 8);
+            assert_eq!(size_of::<BasicLimits>(), 64);
+            assert_eq!(size_of::<ExtendedLimits>(), 144);
+            assert_eq!(size_of::<Accounting>(), 48);
+            assert_eq!(size_of::<ThreadEntry>(), 28);
+            assert_eq!(std::mem::offset_of!(Accounting, active), 40);
+            assert_eq!(std::mem::offset_of!(BasicLimits, affinity), 48);
+        }
+    }
+}
+#[cfg(windows)]
+pub use windows::{inspect, run};

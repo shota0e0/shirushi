@@ -8,6 +8,8 @@ use serde_json::{json, Map, Number, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt, io::Cursor};
 
+pub mod helper_protocol;
+pub mod helper_supervisor;
 pub mod service;
 pub mod snapshot;
 
