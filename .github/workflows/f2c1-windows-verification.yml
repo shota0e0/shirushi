@@ -13,6 +13,11 @@ on:
         type: boolean
         required: false
         default: false
+      f3a_runner_transport:
+        description: "Development-only exact runner build; upload ONLY exe and sanitized runner evidence"
+        type: boolean
+        required: false
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -27,7 +32,7 @@ concurrency:
 jobs:
   first_rust:
     name: F3A First Rust-test Gate only
-    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true
+    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true && inputs.f3a_runner_transport != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -97,7 +102,7 @@ jobs:
 
   f3a_runtime:
     name: F3A independent Candidate B runtime reproduction
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true && inputs.f3a_runner_transport != true
     runs-on: windows-2025
     timeout-minutes: 60
     env:
@@ -250,9 +255,131 @@ jobs:
             "No runtime archive or upload. Distribution Compliance NOT READY. Full F3A NOT READY. Owner Review STOP."
           ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
+  f3a_runner_transport:
+    name: F3A development runner-only transport
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runner_transport == true
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      APPROVED_SOURCE_SHA: 0bea483d650cf89716ace0bd0589c60e7eb14b56
+      APPROVED_RUNNER_SHA256: 9482fe89345af3d8b856131cac84668536e0efef938ab8acfc98640f7f0aab1b
+      APPROVED_LOCK_SHA256: e9c45a2ec307189e0cab2af7712244f9bd2353e1389e5b6dc608fcd9aeb4f4fc
+      WORKFLOW_SHA: ${{ github.sha }}
+    steps:
+      - name: Reject conflicting transport modes
+        shell: pwsh
+        run: |
+          if ("${{ inputs.first_rust_only }}" -eq "true" -or "${{ inputs.f3a_runtime_reproduction }}" -eq "true") {
+            throw "Select exactly one bounded F3A mode"
+          }
+
+      - name: Check out immutable approved runner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Assert source identities and pinned Windows Rust toolchain
+        id: identity
+        shell: pwsh
+        run: |
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceSha -ne $env:APPROVED_SOURCE_SHA) { throw "Approved source revision mismatch" }
+          $runnerHash = (Get-FileHash -LiteralPath desktop\src\bin\shirushi-limited-canary.rs -Algorithm SHA256).Hash.ToLowerInvariant()
+          $lockHash = (Get-FileHash -LiteralPath desktop\Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($runnerHash -ne $env:APPROVED_RUNNER_SHA256 -or $lockHash -ne $env:APPROVED_LOCK_SHA256) { throw "Approved source/lock bytes mismatch" }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rustVersion = rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cargoVersion = cargo --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $rustVersion.StartsWith("rustc 1.97.1 ") -or -not $cargoVersion.StartsWith("cargo 1.97.1 ")) { throw "Pinned toolchain mismatch" }
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runner-transport-target')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "F3A_RUNNER_TRANSPORT_DIR=$(Join-Path $env:RUNNER_TEMP 'f3a-runner-transport')" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "rust_version=$rustVersion" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "cargo_version=$cargoVersion" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Fetch only locked Rust build dependencies
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retest exact limited runner offline
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --features manual-canary --bin shirushi-limited-canary --manifest-path desktop\Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build only the existing debug limited runner offline
+        shell: pwsh
+        run: |
+          cargo build --locked --offline --features manual-canary --bin shirushi-limited-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create and independently audit exact two-file transport
+        shell: pwsh
+        run: |
+          $runnerHash = (Get-FileHash -LiteralPath desktop\src\bin\shirushi-limited-canary.rs -Algorithm SHA256).Hash.ToLowerInvariant()
+          $lockHash = (Get-FileHash -LiteralPath desktop\Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($runnerHash -ne $env:APPROVED_RUNNER_SHA256 -or $lockHash -ne $env:APPROVED_LOCK_SHA256) { throw "Build changed approved source/lock" }
+          if (Test-Path -LiteralPath $env:F3A_RUNNER_TRANSPORT_DIR) { throw "Transport destination already exists" }
+          New-Item -ItemType Directory -Path $env:F3A_RUNNER_TRANSPORT_DIR | Out-Null
+          $builtExe = Join-Path $env:CARGO_TARGET_DIR 'debug/shirushi-limited-canary.exe'
+          $stagedExe = Join-Path $env:F3A_RUNNER_TRANSPORT_DIR 'shirushi-limited-canary.exe'
+          Copy-Item -LiteralPath $builtExe -Destination $stagedExe
+          $builtHash = (Get-FileHash -LiteralPath $builtExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $exeInfo = Get-Item -LiteralPath $stagedExe
+          $exeHash = (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($exeHash -ne $builtHash -or $exeInfo.Length -le 0) { throw "Runner transport copy mismatch" }
+          $evidence = [ordered]@{
+            evidence_version = 1
+            purpose = 'DEVELOPMENT_RUNNER_TRANSPORT_ONLY'
+            repository = 'shota0e0/shirushi'
+            source_commit = $env:APPROVED_SOURCE_SHA
+            workflow_commit = $env:WORKFLOW_SHA
+            runner_source_sha256 = $env:APPROVED_RUNNER_SHA256
+            cargo_lock_sha256 = $env:APPROVED_LOCK_SHA256
+            rust_version = '${{ steps.identity.outputs.rust_version }}'
+            cargo_version = '${{ steps.identity.outputs.cargo_version }}'
+            target = 'x86_64-pc-windows-msvc'
+            profile = 'debug'
+            features = @('manual-canary')
+            rust_tests = 'PASS'
+            runner_execution = 'NOT_RUN'
+            files = @([ordered]@{ path = 'shirushi-limited-canary.exe'; bytes = $exeInfo.Length; sha256 = $exeHash })
+            distribution_compliance = 'NOT_READY'
+            full_f3a = 'NOT_READY'
+          }
+          $evidencePath = Join-Path $env:F3A_RUNNER_TRANSPORT_DIR 'runner-evidence.json'
+          $evidence | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $evidencePath -Encoding utf8NoBOM
+          $items = @(Get-ChildItem -LiteralPath $env:F3A_RUNNER_TRANSPORT_DIR -Force -Recurse)
+          $expected = @('runner-evidence.json', 'shirushi-limited-canary.exe')
+          if ($items.Count -ne 2 -or @($items | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $_.Name -notin $expected }).Count -ne 0) { throw "Unexpected transport file/link/directory" }
+          if (@(Compare-Object $expected @($items.Name)).Count -ne 0) { throw "Transport exact file set mismatch" }
+          $readback = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+          if ($readback.source_commit -ne $env:APPROVED_SOURCE_SHA -or $readback.files.Count -ne 1 -or $readback.files[0].path -ne 'shirushi-limited-canary.exe' -or $readback.files[0].bytes -ne (Get-Item -LiteralPath $stagedExe).Length -or $readback.files[0].sha256 -ne (Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()) { throw "Evidence readback mismatch" }
+          $evidenceHash = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          @("# Development runner transport only", "Approved source: $env:APPROVED_SOURCE_SHA", "Workflow revision: $env:WORKFLOW_SHA", "Runner SHA-256: $exeHash", "Evidence SHA-256: $evidenceHash", "Exact files: 2; no runtime/wheels/Mark/seal/acquisition/local inputs", "No native Prepare, seal, inspection or runner execution. Distribution Compliance NOT READY; Full F3A NOT READY.") | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Upload ONLY development runner and sanitized evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: DEVELOPMENT-RUNNER-TRANSPORT-${{ github.run_id }}
+          path: |
+            ${{ env.F3A_RUNNER_TRANSPORT_DIR }}/shirushi-limited-canary.exe
+            ${{ env.F3A_RUNNER_TRANSPORT_DIR }}/runner-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
+          overwrite: false
+
   verify:
     name: Frozen F2C.1 source verification
-    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && inputs.f3a_runner_transport != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-2025
     timeout-minutes: 60
     env:
