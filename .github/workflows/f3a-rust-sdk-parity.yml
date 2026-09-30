@@ -23,7 +23,6 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: ${{ runner.temp }}/f3a-sdk-parity-target
     steps:
       - name: Check out exact isolated PoC commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -109,6 +108,8 @@ jobs:
 
       - name: Run actual SDK fixture and pure adapter contract tests offline
         shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/f3a-sdk-parity-target
         run: |
           cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
