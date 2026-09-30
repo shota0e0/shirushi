@@ -3,6 +3,11 @@ name: F2C.1 Windows verification
 on:
   workflow_dispatch:
     inputs:
+      desktop_inspection_only:
+        description: "Desktop inspection adapter Rust tests only; no runtime, package or upload"
+        type: boolean
+        required: false
+        default: false
       first_rust_only:
         description: "Run only the F3A first Rust-test gate; no runtime, package or upload"
         type: boolean
@@ -35,9 +40,151 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  desktop_inspection:
+    name: DESKTOP_INSPECTION_ONLY
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_inspection_only == true && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      EVIDENCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Reject conflicting bounded modes
+        id: mode
+        shell: pwsh
+        run: |
+          if ("${{ inputs.first_rust_only }}" -eq "true" -or "${{ inputs.f3a_runtime_reproduction }}" -eq "true" -or "${{ inputs.f3a_runner_transport }}" -eq "true" -or "${{ inputs.f3a_source_identity_only }}" -eq "true") {
+            throw "DESKTOP_INSPECTION_MODE_CONFLICT"
+          }
+
+      - name: Check out exact Desktop test source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert exact source and record frozen inputs
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:EVIDENCE_SHA) { throw "DESKTOP_SOURCE_IDENTITY_MISMATCH" }
+          $paths = @('desktop/Cargo.toml', 'desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock', 'tests/fixtures/inspection/valid_shirushi.png')
+          $names = @('DESKTOP_TOML_SHA', 'DESKTOP_LOCK_SHA', 'POC_LOCK_SHA', 'FIXTURE_SHA')
+          for ($i = 0; $i -lt $paths.Count; $i++) {
+            $hash = (Get-FileHash -LiteralPath $paths[$i] -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$($names[$i])=$hash" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          }
+          if (-not (Select-String -LiteralPath desktop/Cargo.toml -Pattern '^rust-version = "1\.77"$' -Quiet)) { throw "DESKTOP_MSRV_MISMATCH" }
+          "DESKTOP_INSPECTION_ONLY_TESTED_SHA: $head"
+
+      - name: Set up existing BridgeHost test interpreter only
+        id: python_setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+          architecture: x64
+
+      - name: Create dependency-free BridgeHost fixture environment
+        id: bridge_fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = "${{ steps.python_setup.outputs.python-path }}"
+          if (-not [IO.Path]::IsPathFullyQualified($python)) { throw "BRIDGE_TEST_PYTHON_IDENTITY_REQUIRED" }
+          & $python -I -B -c "import platform,struct; assert platform.python_implementation() == 'CPython' and platform.python_version() == '3.12.10' and struct.calcsize('P') == 8"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath .venv-py312) { throw "BRIDGE_TEST_VENV_NOT_FRESH" }
+          # Existing Rust BridgeHost fixtures require this exact path. No pip,
+          # package installation or F3A Candidate runtime reconstruction occurs.
+          & $python -I -B -m venv --without-pip .venv-py312
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\.venv-py312\Scripts\python.exe -I -B -c "import platform,struct; assert platform.python_version() == '3.12.10' and struct.calcsize('P') == 8"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and assert existing pinned Windows Rust toolchain
+        id: rust_setup
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rust = rustc --version
+          if ($LASTEXITCODE -ne 0 -or -not $rust.StartsWith('rustc 1.97.1 ')) { throw "DESKTOP_RUST_IDENTITY_MISMATCH" }
+          $cargo = cargo --version
+          if ($LASTEXITCODE -ne 0 -or -not $cargo.StartsWith('cargo 1.97.1 ')) { throw "DESKTOP_CARGO_IDENTITY_MISMATCH" }
+          "Rust: $rust; Cargo: $cargo"
+
+      - name: Fetch only locked Desktop Rust dependencies
+        id: cargo_fetch
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Desktop default suites including BridgeHost offline
+        id: desktop_default
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --manifest-path desktop\Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Desktop manual-canary suites including Personal Mark offline
+        id: desktop_manual
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --features manual-canary --manifest-path desktop\Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require inspection-supervisor integration coverage
+        id: inspection_coverage
+        shell: pwsh
+        run: |
+          # Full cargo test above automatically runs this integration target in
+          # both configurations when present. Missing coverage is never a PASS.
+          if (-not (Test-Path -LiteralPath desktop/tests/inspection_supervisor.rs -PathType Leaf)) {
+            throw "INSPECTION_SUPERVISOR_TEST_TARGET_MISSING"
+          }
+          'Inspection-supervisor integration target was included in both full Rust suites.'
+
+      - name: Recheck frozen inputs
+        id: preservation
+        if: always() && steps.source.outcome == 'success'
+        shell: pwsh
+        run: |
+          $paths = @('desktop/Cargo.toml', 'desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock', 'tests/fixtures/inspection/valid_shirushi.png')
+          $expected = @($env:DESKTOP_TOML_SHA, $env:DESKTOP_LOCK_SHA, $env:POC_LOCK_SHA, $env:FIXTURE_SHA)
+          for ($i = 0; $i -lt $paths.Count; $i++) {
+            if ((Get-FileHash -LiteralPath $paths[$i] -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[$i]) { throw "DESKTOP_FROZEN_INPUT_CHANGED" }
+          }
+          'ARTIFACT_UPLOAD_COUNT: 0'
+
+      - name: Record bounded Desktop-only result
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = @(
+            '# DESKTOP_INSPECTION_ONLY',
+            "Tested SHA: $env:EVIDENCE_SHA",
+            'Requested tests: Desktop default + manual-canary full Rust suites; inspection-supervisor integration target; existing BridgeHost/Personal Mark Rust regressions.',
+            "Mode validation: ${{ steps.mode.outcome }}",
+            "Desktop default tests: ${{ steps.desktop_default.outcome }}",
+            "Desktop manual-canary tests: ${{ steps.desktop_manual.outcome }}",
+            "Required inspection-supervisor target: ${{ steps.inspection_coverage.outcome }}",
+            "Frozen-input recheck: ${{ steps.preservation.outcome }}",
+            'Missing or skipped inspection-supervisor tests are NOT a PASS.',
+            'BridgeHost fixture: dependency-free CPython test venv only; F3A runtime reconstruction = NOT RUN.',
+            'package generation = NOT RUN',
+            'package audit / Prepare equivalence / runner transport / helper transport = NOT RUN',
+            'artifact upload = NOT RUN',
+            'ARTIFACT_UPLOAD_COUNT: 0',
+            'Production adoption UNAPPROVED; Production Signing PARKED; Distribution Compliance NOT READY; Full F3A NOT READY.'
+          )
+          $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
   first_rust:
     name: F3A First Rust-test Gate only
-    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
+    if: inputs.desktop_inspection_only != true && github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -107,7 +254,7 @@ jobs:
 
   f3a_runtime:
     name: F3A independent Candidate B runtime reproduction
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
+    if: inputs.desktop_inspection_only != true && github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 60
     env:
@@ -262,7 +409,7 @@ jobs:
 
   f3a_runner_transport:
     name: F3A development runner-only transport
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runner_transport == true && inputs.f3a_source_identity_only != true
+    if: inputs.desktop_inspection_only != true && github.event_name == 'workflow_dispatch' && inputs.f3a_runner_transport == true && inputs.f3a_source_identity_only != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -456,7 +603,7 @@ jobs:
 
   f3a_source_identity:
     name: F3A source byte identity diagnostics ONLY
-    if: github.event_name == 'workflow_dispatch' && inputs.f3a_source_identity_only == true
+    if: inputs.desktop_inspection_only != true && github.event_name == 'workflow_dispatch' && inputs.f3a_source_identity_only == true
     runs-on: windows-2025
     timeout-minutes: 10
     env:
@@ -566,7 +713,7 @@ jobs:
 
   verify:
     name: Frozen F2C.1 source verification
-    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: inputs.desktop_inspection_only != true && inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && inputs.f3a_runner_transport != true && inputs.f3a_source_identity_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-2025
     timeout-minutes: 60
     env:
