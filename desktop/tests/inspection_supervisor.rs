@@ -220,6 +220,339 @@ mod process {
     };
     const DEADLINE: Duration = Duration::from_secs(20);
     const CLEANUP: Duration = Duration::from_secs(3);
+    // Test-only observation. These separate anonymous pipes never carry an
+    // inspection response and never reference the target stdout/stderr objects.
+    mod target_handles {
+        use super::*;
+        use std::{
+            ffi::c_void,
+            fs::File,
+            os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle},
+            ptr::{null, null_mut},
+            time::Instant,
+        };
+        use windows_sys::Win32::{
+            Foundation::{
+                CloseHandle, CompareObjectHandles, DuplicateHandle, GetHandleInformation,
+                DUPLICATE_SAME_ACCESS, HANDLE, HANDLE_FLAG_INHERIT,
+            },
+            System::Threading::GetCurrentProcess,
+        };
+        const REPORT: &str = "SHIRUSHI_TEST_TARGET_HANDLE_REPORT";
+        const PROBE: &str = "SHIRUSHI_TEST_TARGET_HANDLE_PROBE";
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(kind: u32) -> HANDLE;
+            fn GetFileType(handle: HANDLE) -> u32;
+            fn CreatePipe(
+                read: *mut HANDLE,
+                write: *mut HANDLE,
+                security: *const c_void,
+                size: u32,
+            ) -> i32;
+            fn PeekNamedPipe(
+                pipe: HANDLE,
+                buffer: *mut c_void,
+                size: u32,
+                read: *mut u32,
+                available: *mut u32,
+                left: *mut u32,
+            ) -> i32;
+        }
+        struct Pipe {
+            read: File,
+            write: Option<OwnedHandle>,
+        }
+        fn duplicate(process: HANDLE, handle: HANDLE, inherit: bool) -> Option<OwnedHandle> {
+            let mut copy = null_mut();
+            // SAFETY: source is the current process or our owned Child handle;
+            // returned duplicate belongs to this process. Never CLOSE_SOURCE.
+            if unsafe {
+                DuplicateHandle(
+                    process,
+                    handle,
+                    GetCurrentProcess(),
+                    &mut copy,
+                    0,
+                    i32::from(inherit),
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                return None;
+            }
+            Some(unsafe { OwnedHandle::from_raw_handle(copy) })
+        }
+        fn pipe() -> Pipe {
+            let mut read = null_mut();
+            let mut write = null_mut();
+            // SAFETY: fresh outputs; null security makes both handles noninheritable.
+            assert!(
+                unsafe { CreatePipe(&mut read, &mut write, null(), 1024) } != 0,
+                "diagnostic pipe unavailable"
+            );
+            let read = unsafe { File::from_raw_handle(read) };
+            let write = unsafe { OwnedHandle::from_raw_handle(write) };
+            // Only a new diagnostic write handle is inheritable. Target flags
+            // and all target handles remain untouched.
+            let inherited = duplicate(unsafe { GetCurrentProcess() }, write.as_raw_handle(), true)
+                .expect("diagnostic write handle unavailable");
+            Pipe {
+                read,
+                write: Some(inherited),
+            }
+        }
+        fn record<const N: usize>(read: &mut File, bound: Duration) -> Option<[u8; N]> {
+            let start = Instant::now();
+            loop {
+                let mut available = 0;
+                // SAFETY: one reader, no pending IO on this private diagnostic
+                // pipe. No target pipe is peeked, read, written or closed here.
+                if unsafe {
+                    PeekNamedPipe(
+                        read.as_raw_handle(),
+                        null_mut(),
+                        0,
+                        null_mut(),
+                        &mut available,
+                        null_mut(),
+                    )
+                } == 0
+                {
+                    return None;
+                }
+                if available == N as u32 {
+                    let mut bytes = [0; N];
+                    read.read_exact(&mut bytes).ok()?;
+                    return bytes.iter().all(|b| *b <= 1).then_some(bytes);
+                }
+                if available > N as u32 || start.elapsed() >= bound {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        fn send(handle: HANDLE, bytes: &[u8]) {
+            let copy = duplicate(unsafe { GetCurrentProcess() }, handle, false)
+                .expect("diagnostic channel unavailable");
+            // Fixed records <=14 bytes fit in the fresh 1024-byte channel.
+            assert!(
+                File::from(copy).write_all(bytes).is_ok(),
+                "diagnostic record failed"
+            );
+        }
+        #[derive(Debug, Clone, Copy)]
+        pub struct Facts {
+            valid: bool,
+            inheritable: bool,
+            pipe: bool,
+        }
+        fn facts(handle: HANDLE) -> Facts {
+            let mut flags = 0;
+            // Borrowed handle only: these APIs do not mutate or close it.
+            let valid = unsafe { GetHandleInformation(handle, &mut flags) } != 0;
+            Facts {
+                valid,
+                inheritable: valid && flags & HANDLE_FLAG_INHERIT != 0,
+                pipe: valid && unsafe { GetFileType(handle) } == 3,
+            }
+        }
+        #[derive(Debug)]
+        pub struct Proof {
+            parent_stdout: Facts,
+            parent_stderr: Facts,
+            descendant_stdout_valid: bool,
+            descendant_stdout_pipe: bool,
+            descendant_stderr_valid: bool,
+            descendant_stderr_pipe: bool,
+            stdout_remote_duplicate: bool,
+            stderr_remote_duplicate: bool,
+            stdout_same_object: bool,
+            stderr_same_object: bool,
+        }
+        impl Proof {
+            pub fn classification(&self) -> &'static str {
+                let p = self.parent_stdout;
+                let e = self.parent_stderr;
+                if !p.valid || !e.valid || !p.pipe || !e.pipe {
+                    "OTHER_HANDLE_STATE"
+                } else if !p.inheritable || !e.inheritable {
+                    "TARGET_HANDLES_NOT_INHERITABLE"
+                } else if self.descendant_stdout_valid
+                    && self.descendant_stdout_pipe
+                    && self.descendant_stderr_valid
+                    && self.descendant_stderr_pipe
+                    && self.stdout_same_object
+                    && self.stderr_same_object
+                {
+                    "TARGET_PIPE_HANDLES_INHERITED"
+                } else if self.stdout_same_object != self.stderr_same_object {
+                    "OTHER_HANDLE_STATE"
+                } else if !self.descendant_stdout_valid
+                    && !self.descendant_stderr_valid
+                    && !self.stdout_remote_duplicate
+                    && !self.stderr_remote_duplicate
+                {
+                    // Failed queries alone cannot distinguish absence from an
+                    // API failure. Do not turn them into a negative proof.
+                    "DIAGNOSTIC_INSUFFICIENT"
+                } else if self.descendant_stdout_valid
+                    && self.descendant_stderr_valid
+                    && (!self.stdout_remote_duplicate || !self.stderr_remote_duplicate)
+                {
+                    "HANDLE_VALUE_VALID_BUT_OBJECT_IDENTITY_UNPROVEN"
+                } else {
+                    "OTHER_HANDLE_STATE"
+                }
+            }
+        }
+        pub struct Channel(Pipe);
+        impl Channel {
+            pub fn new() -> Self {
+                assert!(
+                    std::env::var_os(REPORT).is_none(),
+                    "unexpected diagnostic configuration"
+                );
+                let channel = Self(pipe());
+                // Private test-to-parent communication; never formatted into Debug.
+                std::env::set_var(
+                    REPORT,
+                    (channel.0.write.as_ref().unwrap().as_raw_handle() as usize).to_string(),
+                );
+                channel
+            }
+            pub fn receive(&mut self) -> Option<Proof> {
+                drop(self.0.write.take());
+                let v = record::<14>(&mut self.0.read, Duration::ZERO)?;
+                let f = |i| Facts {
+                    valid: v[i] != 0,
+                    inheritable: v[i + 1] != 0,
+                    pipe: v[i + 2] != 0,
+                };
+                Some(Proof {
+                    parent_stdout: f(0),
+                    parent_stderr: f(3),
+                    descendant_stdout_valid: v[6] != 0,
+                    descendant_stdout_pipe: v[7] != 0,
+                    descendant_stderr_valid: v[8] != 0,
+                    descendant_stderr_pipe: v[9] != 0,
+                    stdout_remote_duplicate: v[10] != 0,
+                    stderr_remote_duplicate: v[11] != 0,
+                    stdout_same_object: v[12] != 0,
+                    stderr_same_object: v[13] != 0,
+                })
+            }
+        }
+        impl Drop for Channel {
+            fn drop(&mut self) {
+                std::env::remove_var(REPORT);
+            }
+        }
+        pub struct ParentProbe {
+            stdout: HANDLE,
+            stderr: HANDLE,
+            stdout_facts: Facts,
+            stderr_facts: Facts,
+            report: HANDLE,
+            channel: Pipe,
+        }
+        impl ParentProbe {
+            pub fn capture() -> Option<Self> {
+                let value = std::env::var(REPORT).ok()?;
+                let report = value.parse::<usize>().ok()? as HANDLE;
+                let stdout = unsafe { GetStdHandle(-11i32 as u32) };
+                let stderr = unsafe { GetStdHandle(-12i32 as u32) };
+                Some(Self {
+                    stdout,
+                    stderr,
+                    stdout_facts: facts(stdout),
+                    stderr_facts: facts(stderr),
+                    report,
+                    channel: pipe(),
+                })
+            }
+            pub fn configure(&self, command: &mut std::process::Command) {
+                command.env(
+                    PROBE,
+                    format!(
+                        "{}:{}:{}",
+                        self.stdout as usize,
+                        self.stderr as usize,
+                        self.channel.write.as_ref().unwrap().as_raw_handle() as usize
+                    ),
+                );
+            }
+            pub fn finish(mut self, child: &std::process::Child) {
+                let v = record::<4>(&mut self.channel.read, Duration::from_secs(5))
+                    .expect("descendant diagnostic record unavailable");
+                // Source values stay open in the hanging descendant. Hold the
+                // returned duplicates only across the object comparison, never
+                // across parent exit or supervisor cleanup.
+                let compare = |target| {
+                    let copy = duplicate(child.as_raw_handle(), target, false);
+                    let same = copy
+                        .as_ref()
+                        .map(|c| unsafe { CompareObjectHandles(target, c.as_raw_handle()) } != 0)
+                        .unwrap_or(false);
+                    let duplicated = copy.is_some();
+                    if let Some(copy) = copy {
+                        // Close this diagnostic duplicate, never the original
+                        // parent/descendant target, before any later wait/exit.
+                        assert!(
+                            unsafe { CloseHandle(copy.into_raw_handle()) } != 0,
+                            "diagnostic duplicate close failed"
+                        );
+                    }
+                    (duplicated, same)
+                };
+                let out = compare(self.stdout);
+                let err = compare(self.stderr);
+                let p = self.stdout_facts;
+                let e = self.stderr_facts;
+                send(
+                    self.report,
+                    &[
+                        p.valid as u8,
+                        p.inheritable as u8,
+                        p.pipe as u8,
+                        e.valid as u8,
+                        e.inheritable as u8,
+                        e.pipe as u8,
+                        v[0],
+                        v[1],
+                        v[2],
+                        v[3],
+                        out.0 as u8,
+                        err.0 as u8,
+                        out.1 as u8,
+                        err.1 as u8,
+                    ],
+                );
+            }
+        }
+        pub fn descendant_probe() {
+            let Ok(value) = std::env::var(PROBE) else {
+                return;
+            };
+            // Private raw values are never asserted/formatted/logged.
+            let fields: Option<Vec<usize>> = value.split(':').map(|s| s.parse().ok()).collect();
+            let fields = fields
+                .filter(|v| v.len() == 3)
+                .expect("invalid diagnostic request");
+            let out = facts(fields[0] as HANDLE);
+            let err = facts(fields[1] as HANDLE);
+            send(
+                fields[2] as HANDLE,
+                &[
+                    out.valid as u8,
+                    out.pipe as u8,
+                    err.valid as u8,
+                    err.pipe as u8,
+                ],
+            );
+            // Original hang/retention behavior continues after this observation.
+        }
+    }
     fn run(mode: SyntheticBehavior, c: &Control, deadline: Duration) -> supervisor::ProcessReport {
         let config = FixedExecutable::synthetic_test_child(std::env::current_exe().unwrap(), mode);
         supervisor::inspect(&config, Path::new(PRIVATE), ID, c, deadline, CLEANUP)
@@ -257,9 +590,12 @@ mod process {
         assert_eq!(request["operation"], "INSPECT_LIMITED");
         let mut value = success();
         match mode {
-            "hang" => loop {
-                thread::sleep(Duration::from_secs(1));
-            },
+            "hang" => {
+                target_handles::descendant_probe();
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
             "abnormal" => std::process::exit(23),
             "malformed" => {
                 let _ = std::io::stdout().write_all(b"{private-marker");
@@ -286,14 +622,21 @@ mod process {
             }
             "leaky-child" => {
                 // Retain a contained descendant beyond parent exit. It receives EOF on stdin.
+                let probe = target_handles::ParentProbe::capture();
                 let mut descendant = std::process::Command::new(std::env::current_exe().unwrap());
                 descendant
                     .env("SHIRUSHI_DESKTOP_SYNTHETIC_CHILD", "hang")
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
+                if let Some(probe) = &probe {
+                    probe.configure(&mut descendant);
+                }
                 let mut child = descendant.spawn().unwrap();
                 child.stdin.take().unwrap().write_all(&input).unwrap();
+                if let Some(probe) = probe {
+                    probe.finish(&child);
+                }
             }
             "success" => {
                 let _ = std::io::stderr().write_all(b"private-marker stderr");
@@ -460,7 +803,14 @@ mod process {
     }
     #[test]
     fn descendant_cleanup_failure_supersedes_valid_response() {
+        let mut diagnostic = target_handles::Channel::new();
         let r = run(SyntheticBehavior::LeakyChild, &Control::new(ID), DEADLINE);
+        if let Some(proof) = diagnostic.receive() {
+            println!("TARGET_HANDLE_REPORT: {proof:?}");
+            println!("TARGET_HANDLE_CLASSIFICATION: {}", proof.classification());
+        } else {
+            println!("TARGET_HANDLE_CLASSIFICATION: DIAGNOSTIC_INSUFFICIENT");
+        }
         cleaned(&r);
         if r.outcome == HelperOutcome::Failure(ServiceFailure::Timeout) {
             assert!(r.pre_cleanup_wait_state.is_some(), "{r:?}");
