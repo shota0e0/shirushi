@@ -1904,6 +1904,342 @@ mod runner {
                 assert!(safe_relative(path).is_err());
             }
         }
+
+        // These disk-binding fixtures are synthetic, non-executable Python/runner
+        // stubs plus unchanged copies of the public fixture and pinned tool. They
+        // test existing serialization/integrity refusal, NOT native Prepare or
+        // compute_seal identity probing. Only the separate CI integration can
+        // prove actual Prepare -> compute_seal -> fixed-fixture inspection.
+        struct DiskBindingFixture {
+            workspace: Option<Workspace>,
+            seal: RuntimeSeal,
+        }
+        impl DiskBindingFixture {
+            fn root(&self) -> &Path {
+                &self.workspace.as_ref().unwrap().path
+            }
+            fn create() -> Self {
+                let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+                let workspace = Workspace::create(repository).unwrap();
+                let root = &workspace.path;
+                for directory in [
+                    "scripts",
+                    "src",
+                    "tools",
+                    "fixtures",
+                    "config",
+                    "runtime/site-packages",
+                    "base",
+                    ".venv-py312/Scripts",
+                ] {
+                    fs::create_dir_all(root.join(directory)).unwrap();
+                }
+                for relative in [
+                    RUNNER,
+                    SCRIPT,
+                    "src/inspection_metadata.py",
+                    "runtime/site-packages/synthetic_canary_module.py",
+                    "base/python.exe",
+                    VENV_PYTHON,
+                    ".venv-py312/Scripts/pythonw.exe",
+                ] {
+                    fs::write(root.join(relative), b"synthetic non-executable test stub").unwrap();
+                }
+                fs::copy(
+                    repository.join("tests/fixtures/inspection/valid_shirushi.png"),
+                    root.join(FIXTURE),
+                )
+                .unwrap();
+                fs::copy(
+                    repository.join("tools/c2patool-0.26.60/c2patool/c2patool.exe"),
+                    root.join("tools/c2patool.exe"),
+                )
+                .unwrap();
+                fs::write(
+                    root.join(FIXTURE_MANIFEST),
+                    b"{\"syntheticBindingOnly\":true}",
+                )
+                .unwrap();
+                fs::write(root.join("config/verifier-settings.json"), b"{}").unwrap();
+                let dependencies: Vec<_> = [
+                    ("cffi", "2.1.1"),
+                    ("cryptography", "50.0.1"),
+                    ("pillow", "12.3.0"),
+                    ("pycparser", "3.0"),
+                ]
+                .into_iter()
+                .map(|(name, version)| {
+                    serde_json::json!({"name":name,"version":version,
+                        "filename":format!("{name}-{version}-synthetic.whl"),
+                        "sha256":"a".repeat(64),"size":1})
+                })
+                .collect();
+                let lock = serde_json::json!({"schemaVersion":1,"python":EXPECTED_IDENTITY,
+                    "implementation":"CPython","bits":64,"dependencies":dependencies});
+                fs::write(root.join("runtime-lock.json"), lock.to_string()).unwrap();
+                let base = root.join("base");
+                fs::write(
+                    root.join(RUNTIME_ROOT).join("pyvenv.cfg"),
+                    format!(
+                        "home = {}\ninclude-system-site-packages = false\nversion = {}\nexecutable = {}\ncommand = synthetic-non-executable-test-only\n",
+                        base.display(), EXPECTED_IDENTITY, base.join("python.exe").display()
+                    ),
+                )
+                .unwrap();
+                let mut paths = BTreeSet::new();
+                let mut folded = BTreeSet::new();
+                collect_tree(root, root, true, &mut paths, &mut folded).unwrap();
+                let records: Vec<_> = paths
+                    .into_iter()
+                    .map(|path| {
+                        let (size, sha256) = digest(&root.join(&path), "PACKAGE_INVALID").unwrap();
+                        FileRecord { path, size, sha256 }
+                    })
+                    .collect();
+                let manifest = serde_json::json!({"schemaVersion":1,
+                    "artifactType":"F3A_LIMITED_DEVELOPMENT_CANARY","files":records});
+                fs::write(root.join(MANIFEST), manifest.to_string()).unwrap();
+                let sums: String = records
+                    .iter()
+                    .map(|record| format!("{}  {}\n", record.sha256, record.path))
+                    .chain(std::iter::once(format!(
+                        "{}  {}\n",
+                        digest(&root.join(MANIFEST), "PACKAGE_INVALID").unwrap().1,
+                        MANIFEST
+                    )))
+                    .collect();
+                fs::write(root.join(SUMS), sums).unwrap();
+                let mut runtime_artifacts: Vec<_> = records
+                    .into_iter()
+                    .filter(|record| {
+                        record.path.starts_with("runtime/")
+                            || record.path.starts_with("src/")
+                            || record.path.starts_with("scripts/")
+                            || record.path.starts_with("tools/")
+                            || record.path.starts_with("config/")
+                            || record.path == RUNNER
+                    })
+                    .collect();
+                for relative in [VENV_PYTHON, ".venv-py312/Scripts/pythonw.exe"] {
+                    let (size, sha256) = digest(&root.join(relative), "SEAL_INVALID").unwrap();
+                    runtime_artifacts.push(FileRecord {
+                        path: relative.into(),
+                        size,
+                        sha256,
+                    });
+                }
+                runtime_artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+                let seal = RuntimeSeal {
+                    seal_format_version: 1,
+                    runner_contract_version: RUNNER_CONTRACT_VERSION,
+                    package_manifest_sha256: digest(&root.join(MANIFEST), "SEAL_INVALID")
+                        .unwrap()
+                        .1,
+                    runtime_lock_sha256: digest(&root.join("runtime-lock.json"), "SEAL_INVALID")
+                        .unwrap()
+                        .1,
+                    fixture_manifest_sha256: digest(&root.join(FIXTURE_MANIFEST), "SEAL_INVALID")
+                        .unwrap()
+                        .1,
+                    identity: SealedIdentity {
+                        version: EXPECTED_IDENTITY.into(),
+                        bits: 64,
+                        implementation: "CPython".into(),
+                        python_executable_sha256: digest(&root.join(VENV_PYTHON), "SEAL_INVALID")
+                            .unwrap()
+                            .1,
+                        base_python_executable_sha256: digest(
+                            &base.join("python.exe"),
+                            "SEAL_INVALID",
+                        )
+                        .unwrap()
+                        .1,
+                    },
+                    runtime_artifacts,
+                    wheel_artifacts: wheel_records(root).unwrap(),
+                };
+                assert_immutable(root).unwrap();
+                Self {
+                    workspace: Some(workspace),
+                    seal,
+                }
+            }
+        }
+        impl Drop for DiskBindingFixture {
+            fn drop(&mut self) {
+                if let Some(workspace) = self.workspace.take() {
+                    workspace.cleanup().unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn synthetic_disk_seal_persistence_exact_binding_and_no_overwrite() {
+            let fixture = DiskBindingFixture::create();
+            validate_bound_files(fixture.root(), &fixture.seal).unwrap();
+            persist_seal(fixture.root(), &fixture.seal).unwrap();
+            let before = fs::read(fixture.root().join(SEAL)).unwrap();
+            let stored: RuntimeSeal = serde_json::from_slice(&before).unwrap();
+            assert_eq!(stored, fixture.seal);
+            validate_bound_files(fixture.root(), &stored).unwrap();
+            assert_eq!(
+                persist_seal(fixture.root(), &fixture.seal)
+                    .unwrap_err()
+                    .code,
+                "SEAL_INVALID"
+            );
+            assert_eq!(fs::read(fixture.root().join(SEAL)).unwrap(), before);
+        }
+
+        #[test]
+        fn synthetic_disk_runtime_fixture_lock_and_python_tampering_refused() {
+            let fixture = DiskBindingFixture::create();
+            for (relative, expected_code) in [
+                (
+                    "runtime/site-packages/synthetic_canary_module.py",
+                    "PACKAGE_INVALID",
+                ),
+                (FIXTURE, "PACKAGE_INVALID"),
+                (FIXTURE_MANIFEST, "PACKAGE_INVALID"),
+                ("runtime-lock.json", "PACKAGE_INVALID"),
+                (VENV_PYTHON, "SEAL_INVALID"),
+                (".venv-py312/Scripts/pythonw.exe", "SEAL_INVALID"),
+                ("base/python.exe", "PACKAGE_INVALID"),
+            ] {
+                let path = fixture.root().join(relative);
+                let before = fs::read(&path).unwrap();
+                fs::write(&path, b"synthetic tampering of temporary copy only").unwrap();
+                let outcome = validate_bound_files(fixture.root(), &fixture.seal);
+                fs::write(&path, &before).unwrap();
+                assert_eq!(outcome.unwrap_err().code, expected_code, "{relative}");
+                validate_bound_files(fixture.root(), &fixture.seal).unwrap();
+            }
+        }
+
+        #[test]
+        fn synthetic_disk_python_identity_and_seal_bindings_refused() {
+            let fixture = DiskBindingFixture::create();
+            let original = serde_json::to_value(&fixture.seal).unwrap();
+            for (pointer, replacement) in [
+                ("/sealFormatVersion", serde_json::json!(2)),
+                ("/runnerContractVersion", serde_json::json!(2)),
+                ("/packageManifestSha256", serde_json::json!("0".repeat(64))),
+                ("/runtimeLockSha256", serde_json::json!("0".repeat(64))),
+                ("/fixtureManifestSha256", serde_json::json!("0".repeat(64))),
+                ("/identity/version", serde_json::json!("3.12.11")),
+                ("/identity/bits", serde_json::json!(32)),
+                ("/identity/implementation", serde_json::json!("PyPy")),
+                (
+                    "/identity/pythonExecutableSha256",
+                    serde_json::json!("0".repeat(64)),
+                ),
+                (
+                    "/identity/basePythonExecutableSha256",
+                    serde_json::json!("0".repeat(64)),
+                ),
+                (
+                    "/wheelArtifacts/0/sha256",
+                    serde_json::json!("0".repeat(64)),
+                ),
+                (
+                    "/runtimeArtifacts/0/sha256",
+                    serde_json::json!("0".repeat(64)),
+                ),
+            ] {
+                let mut changed = original.clone();
+                *changed.pointer_mut(pointer).unwrap() = replacement;
+                let changed: RuntimeSeal = serde_json::from_value(changed).unwrap();
+                assert_eq!(
+                    validate_bound_files(fixture.root(), &changed)
+                        .unwrap_err()
+                        .code,
+                    "SEAL_INVALID",
+                    "{pointer}"
+                );
+            }
+        }
+
+        #[test]
+        fn synthetic_disk_missing_duplicate_and_unknown_seals_refused_before_probe() {
+            let fixture = DiskBindingFixture::create();
+            assert_eq!(
+                validate_seal(fixture.root(), fixture.root())
+                    .unwrap_err()
+                    .code,
+                "SEAL_INVALID"
+            );
+            let valid = serde_json::to_string(&fixture.seal).unwrap();
+            let mut unknown = serde_json::to_value(&fixture.seal).unwrap();
+            unknown["unknown"] = true.into();
+            for raw in [
+                "{}".to_owned(),
+                valid.replacen(
+                    "\"sealFormatVersion\":1",
+                    "\"sealFormatVersion\":1,\"sealFormatVersion\":1",
+                    1,
+                ),
+                unknown.to_string(),
+            ] {
+                fs::write(fixture.root().join(SEAL), &raw).unwrap();
+                // Stub Python bytes are non-executable. Reaching a probe would
+                // incorrectly produce RUNTIME_UNAVAILABLE, not SEAL_INVALID.
+                assert_eq!(
+                    validate_seal(fixture.root(), fixture.root())
+                        .unwrap_err()
+                        .code,
+                    "SEAL_INVALID"
+                );
+                assert_eq!(fs::read(fixture.root().join(SEAL)).unwrap(), raw.as_bytes());
+            }
+        }
+
+        #[test]
+        fn fixed_job_observation_test_child() {
+            // This helper has no production command/API. Only its exact-name
+            // test subprocess receives the fixed marker; normal tests are inert.
+            if std::env::var_os("SHIRUSHI_F3A_TEST_JOB_CHILD") == Some("1".into()) {
+                thread::sleep(Duration::from_secs(30));
+            }
+        }
+
+        #[test]
+        fn actual_job_nonempty_refuses_and_contained_termination_drains() {
+            let executable = std::env::current_exe().unwrap();
+            let workspace = Workspace::create(executable.parent().unwrap()).unwrap();
+            let job = new_job().unwrap();
+            assert_eq!(active_processes(job.0).unwrap(), 0);
+            wait_job_zero(job.0, Duration::ZERO).unwrap();
+            let mut command = fixed_command(&executable, &workspace.path).unwrap();
+            command
+                .args([
+                    "--exact",
+                    "runner::tests::fixed_job_observation_test_child",
+                    "--nocapture",
+                ])
+                .env("SHIRUSHI_F3A_TEST_JOB_CHILD", "1")
+                .creation_flags(CREATE_SUSPENDED)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let mut child = command.spawn().unwrap();
+            if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } == 0 {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("fixed test child could not be contained");
+            }
+            let resumed = resume_suspended(&child);
+            let observed = if resumed.is_ok() {
+                wait_job_zero(job.0, Duration::ZERO)
+            } else {
+                resumed
+            };
+            let cleanup = terminate_job_and_verify(job.0);
+            child.wait().unwrap();
+            cleanup.unwrap();
+            assert_eq!(observed.unwrap_err().code, "ORPHAN_PROCESS_DETECTED");
+            assert_eq!(active_processes(job.0).unwrap(), 0);
+            workspace.cleanup().unwrap();
+        }
     }
 }
 

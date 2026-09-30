@@ -8,6 +8,11 @@ on:
         type: boolean
         required: false
         default: false
+      f3a_runtime_reproduction:
+        description: "Independent Candidate B native Limited Inspection proof only; no runtime upload"
+        type: boolean
+        required: false
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -22,7 +27,7 @@ concurrency:
 jobs:
   first_rust:
     name: F3A First Rust-test Gate only
-    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true
+    if: github.event_name == 'workflow_dispatch' && inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -90,9 +95,164 @@ jobs:
           )
           $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
+  f3a_runtime:
+    name: F3A independent Candidate B runtime reproduction
+    if: github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: ${{ runner.temp }}/f3a-runtime-target
+      EVIDENCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Assert exclusive proof mode
+        id: mode
+        shell: pwsh
+        run: |
+          if ("${{ inputs.first_rust_only }}" -eq "true") { throw "Select exactly one bounded F3A mode" }
+
+      - name: Check out exact reproduction source
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up approved CPython 3.12.10 x64
+        id: python_setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+          architecture: x64
+
+      - name: Create isolated build-only pip 25.0.1 environment
+        id: build_environment
+        shell: pwsh
+        run: |
+          $basePython = "${{ steps.python_setup.outputs.python-path }}"
+          if (-not [IO.Path]::IsPathFullyQualified($basePython)) { throw "Explicit Python identity required" }
+          & $basePython -I -B -c "import platform,struct; assert platform.python_implementation() == 'CPython' and platform.python_version() == '3.12.10' and struct.calcsize('P') == 8"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $gateRoot = Join-Path $env:RUNNER_TEMP "f3a-runtime-reproduction"
+          if (Test-Path -LiteralPath $gateRoot) { throw "Gate workspace is not fresh" }
+          New-Item -ItemType Directory -Path $gateRoot -ErrorAction Stop | Out-Null
+          $toolVenv = Join-Path $gateRoot "build-tools"
+          & $basePython -I -B -m venv $toolVenv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolPython = Join-Path $toolVenv "Scripts\python.exe"
+          & $toolPython -I -B -c "import pip; assert pip.__version__ == '25.0.1'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "F3A_TOOL_PYTHON=$toolPython" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "F3A_GATE_ROOT=$gateRoot" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($sourceSha -ne $env:EVIDENCE_SHA) { throw "Tested source SHA mismatch" }
+          "Tested SHA: $sourceSha; CPython 3.12.10 x64; build-only pip 25.0.1"
+
+      - name: Acquire only four approved immutable wheels and verify hashes
+        id: inputs
+        shell: pwsh
+        run: |
+          & $env:F3A_TOOL_PYTHON -I -B -S scripts\verify_f3a_ci_runtime.py fetch --wheelhouse (Join-Path $env:F3A_GATE_ROOT "wheelhouse") --evidence (Join-Path $env:F3A_GATE_ROOT "inputs.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Construct new Candidate B with standard offline resolver and install
+        id: runtime
+        shell: pwsh
+        run: |
+          & $env:F3A_TOOL_PYTHON -I -B scripts\prepare_f3a_limited_runtime.py --python $env:F3A_TOOL_PYTHON --wheelhouse (Join-Path $env:F3A_GATE_ROOT "wheelhouse") --output (Join-Path $env:F3A_GATE_ROOT "runtime") --evidence (Join-Path $env:F3A_GATE_ROOT "runtime-evidence.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run existing Python baseline and reproduction boundary tests
+        id: python_tests
+        shell: pwsh
+        run: |
+          $site = Join-Path $env:F3A_GATE_ROOT "runtime\site-packages"
+          & $env:F3A_TOOL_PYTHON -I -B -c "import sys,unittest; sys.path[:0]=[sys.argv[1],sys.argv[2]]; s=unittest.defaultTestLoader.loadTestsFromNames(['tests.test_prepare_f3a_limited_runtime','tests.test_inspect_limited_entry','tests.test_inspection_metadata','tests.test_f3a_ci_runtime','tests.test_f2c1_ci_verification']); r=unittest.TextTestRunner(verbosity=2).run(s); raise SystemExit(not r.wasSuccessful())" $site $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:F3A_TOOL_PYTHON -I -B scripts\verify_f2c1_ci.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and assert existing pinned Rust toolchain
+        id: rust_setup
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $targets = rustup target list --toolchain $env:RUSTUP_TOOLCHAIN --installed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (@($targets) -notcontains "x86_64-pc-windows-msvc") { throw "Pinned MSVC target missing" }
+          $rustVersion = rustc --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $rustVersion.StartsWith("rustc 1.97.1 ")) { throw "Unexpected Rust version" }
+          $cargoVersion = cargo --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $cargoVersion.StartsWith("cargo 1.97.1 ")) { throw "Unexpected Cargo version" }
+
+      - name: Fetch unchanged locked Rust build inputs
+        id: cargo_fetch
+        shell: pwsh
+        run: |
+          cargo fetch --locked --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run all 19 limited-runner Rust tests including real Job cleanup
+        id: cargo_test
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --features manual-canary --bin shirushi-limited-canary --manifest-path desktop\Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build only the existing limited native runner offline
+        id: runner_build
+        shell: pwsh
+        run: |
+          cargo build --locked --offline --features manual-canary --bin shirushi-limited-canary --manifest-path desktop\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assemble ephemeral Candidate B inspection test tree without archive
+        id: assemble
+        shell: pwsh
+        run: |
+          & $env:F3A_TOOL_PYTHON -I -B -S scripts\verify_f3a_ci_runtime.py assemble --runtime (Join-Path $env:F3A_GATE_ROOT "runtime") --runtime-evidence (Join-Path $env:F3A_GATE_ROOT "runtime-evidence.json") --runner (Join-Path $env:CARGO_TARGET_DIR "debug\shirushi-limited-canary.exe") --output (Join-Path $env:F3A_GATE_ROOT "candidate-b") --evidence (Join-Path $env:F3A_GATE_ROOT "assembly.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prove native Prepare seal reuse limited inspection exit and Job empty
+        id: native_proof
+        shell: pwsh
+        run: |
+          $basePython = "${{ steps.python_setup.outputs.python-path }}"
+          & $env:F3A_TOOL_PYTHON -I -B -S scripts\verify_f3a_ci_runtime.py prove --package (Join-Path $env:F3A_GATE_ROOT "candidate-b") --python $basePython --negatives-root (Join-Path $env:F3A_GATE_ROOT "negative-copies") --evidence (Join-Path $env:F3A_GATE_ROOT "native-proof.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record bounded CI-only evidence without runtime upload
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:F3A_GATE_ROOT) {
+            foreach ($name in @("inputs.json", "runtime-evidence.json", "assembly.json", "native-proof.json")) {
+              $evidence = Join-Path $env:F3A_GATE_ROOT $name
+              if (Test-Path -LiteralPath $evidence -PathType Leaf) {
+                if ((Get-Item -LiteralPath $evidence).Length -gt 262144) { throw "Evidence exceeds bounded log size" }
+                "CI evidence: $name"
+                Get-Content -LiteralPath $evidence -Raw
+              }
+            }
+          }
+          @(
+            "# F3A independent Candidate B CI proof",
+            "Tested SHA: $env:EVIDENCE_SHA",
+            "Inputs: ${{ steps.inputs.outcome }}; offline runtime: ${{ steps.runtime.outcome }}",
+            "Python tests: ${{ steps.python_tests.outcome }}; Rust 19 tests: ${{ steps.cargo_test.outcome }}",
+            "Runner build: ${{ steps.runner_build.outcome }}; ephemeral assembly: ${{ steps.assemble.outcome }}",
+            "Native Prepare/seal/limited inspection/cleanup: ${{ steps.native_proof.outcome }}",
+            "Candidate A is local-only and unchanged. Whole-environment A/B byte equality is not required or claimed.",
+            "cffi launcher: PRESENT_UNUSED_PENDING_DISTRIBUTION_REVIEW. pyo3-ffi: PARTIAL / ATTRIBUTION_UNRESOLVED.",
+            "No runtime archive or upload. Distribution Compliance NOT READY. Full F3A NOT READY. Owner Review STOP."
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
   verify:
     name: Frozen F2C.1 source verification
-    if: inputs.first_rust_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-2025
     timeout-minutes: 60
     env:

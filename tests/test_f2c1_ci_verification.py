@@ -1,7 +1,9 @@
 """Verification-only audit negatives; no Cargo, app launch or real profile I/O."""
 
 from pathlib import Path
+import hashlib
 import importlib.util
+import re
 import shutil
 import unittest
 import uuid
@@ -116,6 +118,49 @@ class F2C1AuditTests(unittest.TestCase):
                          source.replace('"desktop.js"', '"styles.css"')):
             with self.subTest(), self.assertRaises(ValueError):
                 AUDIT.asset_mapping(modified)
+
+
+class F3AModeIsolationTests(unittest.TestCase):
+    """New proof mode cannot alter either existing mode or upload a runtime."""
+
+    def setUp(self):
+        self.workflow = (PROJECT / ".github/workflows/f2c1-windows-verification.yml").read_text(encoding="utf-8")
+
+    def job(self, name):
+        match = re.search(r"^  " + re.escape(name) + r":\n(.*?)(?=^  [a-z0-9_]+:\n|\Z)", self.workflow, re.M | re.S)
+        self.assertIsNotNone(match)
+        return match.group(1)
+
+    def test_existing_normal_steps_are_unchanged(self):
+        steps = self.job("verify").split("    steps:\n", 1)[1]
+        self.assertEqual("b09d7611f9135128ffbd97dbd94deff516c3eb658926bb28ee4baaebb46ccae9", hashlib.sha256(steps.encode()).hexdigest())
+        self.assertIn("inputs.f3a_runtime_reproduction != true && inputs.first_rust_only != true &&", self.job("verify"))
+
+    def test_existing_first_rust_steps_are_unchanged(self):
+        steps = self.job("first_rust").split("    steps:\n", 1)[1]
+        # Job-separating blank line is not part of the existing step payload.
+        steps = steps.rstrip("\n") + "\n"
+        self.assertEqual("bf02c597559a0e5c986892b8d8f0b25dfe5325ce88395166509f38af1a2f8fc6", hashlib.sha256(steps.encode()).hexdigest())
+        self.assertIn("inputs.first_rust_only == true && inputs.f3a_runtime_reproduction != true", self.job("first_rust"))
+
+    def test_new_mode_defaults_off_and_rejects_conflicting_modes(self):
+        inputs = self.workflow.split("  pull_request:", 1)[0]
+        self.assertRegex(inputs, r"f3a_runtime_reproduction:\n(?:.*\n){3}        default: false")
+        job = self.job("f3a_runtime")
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.f3a_runtime_reproduction == true", job)
+        self.assertIn('throw "Select exactly one bounded F3A mode"', job)
+
+    def test_reproduction_has_no_runtime_upload_or_legacy_package_step(self):
+        job = self.job("f3a_runtime")
+        for forbidden in ("actions/upload-artifact", "package_f2c6_canary.py", "workflow_dispatch.yml", "--upgrade", "Get-Command python", "ExecutionPolicy", "Bypass"):
+            self.assertNotIn(forbidden, job)
+        for required in ("verify_f3a_ci_runtime.py fetch", "prepare_f3a_limited_runtime.py", "verify_f3a_ci_runtime.py assemble", "verify_f3a_ci_runtime.py prove", "--locked --offline", "native-proof.json"):
+            self.assertIn(required, job)
+
+    def test_immutable_dependency_inputs_have_exact_byte_attributes(self):
+        attributes = (PROJECT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+        for path in ("packaging/f3a-limited-runtime-lock.json", "packaging/f3a-limited-requirements.txt"):
+            self.assertIn(path + " -text", attributes)
 
 
 if __name__ == "__main__":
