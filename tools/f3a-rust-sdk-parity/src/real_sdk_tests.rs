@@ -7,11 +7,34 @@ fn real_sdk_fixed_fixture_positive_evidence_and_exact_wire_result() {
     fingerprint(FIXTURE).unwrap();
     let e = read_sdk_evidence(FIXTURE).expect("REAL_SDK_READER_FAILED");
     // Path-free diagnostics. Never emit SDK debug objects/metadata or exception text.
-    println!("REAL_SDK_EVIDENCE: parsed={} embedded={} state={} refs={} rights={} success={} info={} failure={} ingredient_statuses={}",
-        e.parsed,e.embedded,e.validation_state,e.references.len(),e.rights.len(),e.success.len(),e.informational.len(),e.failure.len(),e.ingredient_statuses.len());
+    println!("REAL_SDK_EVIDENCE: parsed={} embedded={} state={} refs={} rights={} success={} info={} failure={} ingredient_success={} ingredient_info={} ingredient_failure={}",
+        e.parsed,e.embedded,e.validation_state,e.references.len(),e.rights.len(),e.success.len(),e.informational.len(),e.failure.len(),e.ingredient_success.len(),e.ingredient_informational.len(),e.ingredient_failure.len());
     for s in e.success.iter().chain(&e.informational).chain(&e.failure) {
         println!("REAL_SDK_STATUS_CODE: {}", s.code);
     }
+    for (category, statuses) in [
+        ("success", &e.ingredient_success),
+        ("informational", &e.ingredient_informational),
+        ("failure", &e.ingredient_failure),
+    ] {
+        for s in statuses {
+            println!(
+                "REAL_SDK_INGREDIENT_STATUS_CODE: category={category} code={}",
+                s.code
+            );
+        }
+    }
+    println!("REAL_SDK_LEGACY_STATUS_COUNT: {}", e.legacy_statuses.len());
+    let prefix = format!(
+        "self#jumbf=/c2pa/{}/",
+        e.active_label.as_deref().unwrap_or("")
+    );
+    println!("REAL_SDK_SCOPE: refs_active={} signature_active={} rights_instance={} rights_value_exact={}",
+        e.references.iter().all(|r| r.starts_with(&format!("{prefix}c2pa.assertions/"))),
+        e.success.iter().filter(|s| s.code == "claimSignature.validated" || s.code == "claimSignature.insideValidity")
+            .all(|s| s.url.as_deref() == Some(&format!("{prefix}c2pa.signature"))),
+        e.rights.first().map(|r| r.instance).unwrap_or(usize::MAX),
+        e.rights.first().is_some_and(|r| r.value == expected_rights()));
     let actual = adapt(&e).expect("REAL_SDK_POSITIVE_EVIDENCE_OR_MAPPING_FAILED");
     assert_eq!(actual, canonical_success());
     assert_eq!(inspect_fixed(FIXTURE).unwrap(), actual);

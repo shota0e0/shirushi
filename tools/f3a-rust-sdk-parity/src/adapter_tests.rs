@@ -32,7 +32,9 @@ fn good() -> SdkEvidence {
         informational: vec![],
         failure: vec![],
         legacy_statuses: vec![],
-        ingredient_statuses: vec![],
+        ingredient_success: vec![],
+        ingredient_informational: vec![],
+        ingredient_failure: vec![],
         rights: vec![RightsAssertion {
             label: RIGHTS_LABEL.into(),
             instance: 0,
@@ -190,7 +192,7 @@ fn unsupported_sdk_state_and_status_rejected() {
 #[test]
 fn ingredient_or_cross_claim_evidence_cannot_satisfy_active_claim() {
     rejects(|e| {
-        e.ingredient_statuses.push(Status {
+        e.ingredient_success.push(Status {
             code: "claimSignature.validated".into(),
             url: None,
         })

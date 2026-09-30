@@ -67,7 +67,9 @@ pub struct SdkEvidence {
     pub informational: Vec<Status>,
     pub failure: Vec<Status>,
     pub legacy_statuses: Vec<Status>,
-    pub ingredient_statuses: Vec<Status>,
+    pub ingredient_success: Vec<Status>,
+    pub ingredient_informational: Vec<Status>,
+    pub ingredient_failure: Vec<Status>,
     pub rights: Vec<RightsAssertion>,
 }
 
@@ -119,13 +121,15 @@ pub fn read_sdk_evidence(bytes: &[u8]) -> Result<SdkEvidence, Failure> {
         code: s.code().to_owned(),
         url: s.url().map(str::to_owned),
     };
-    let mut ingredient_statuses = Vec::new();
+    let mut ingredient_success = Vec::new();
+    let mut ingredient_informational = Vec::new();
+    let mut ingredient_failure = Vec::new();
     if let Some(deltas) = results.ingredient_deltas() {
         for delta in deltas {
             let s = delta.validation_deltas();
-            ingredient_statuses.extend(s.success().iter().map(convert));
-            ingredient_statuses.extend(s.informational().iter().map(convert));
-            ingredient_statuses.extend(s.failure().iter().map(convert));
+            ingredient_success.extend(s.success().iter().map(convert));
+            ingredient_informational.extend(s.informational().iter().map(convert));
+            ingredient_failure.extend(s.failure().iter().map(convert));
         }
     }
     let rights = active
@@ -164,7 +168,9 @@ pub fn read_sdk_evidence(bytes: &[u8]) -> Result<SdkEvidence, Failure> {
             .iter()
             .map(convert)
             .collect(),
-        ingredient_statuses,
+        ingredient_success,
+        ingredient_informational,
+        ingredient_failure,
         rights,
     })
 }
@@ -196,7 +202,9 @@ pub fn adapt(e: &SdkEvidence) -> Result<Value, Failure> {
         || !e.embedded
         || e.validation_state != "VALID"
         || label.is_empty()
-        || !e.ingredient_statuses.is_empty()
+        || !e.ingredient_success.is_empty()
+        || !e.ingredient_informational.is_empty()
+        || !e.ingredient_failure.is_empty()
         || !e.legacy_statuses.is_empty()
         || e.success.iter().any(|s| !known_success(&s.code))
         || e.informational
