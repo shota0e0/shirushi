@@ -153,8 +153,15 @@ class LimitedTests(unittest.TestCase):
         # B --target directory rather than the build-only interpreter's site.
         site = Path(module.Image.__file__).resolve().parents[1]
         code = "import sys; sys.path[:0]=" + repr([str(site), str(ROOT / "src"), str(ROOT / "scripts")]) + "; import inspection_metadata; assert not any(x.split('.')[0] in {'torch','torchvision','trustmark','torchmetrics','inspection_service','creator_verify'} for x in sys.modules)"
-        completed = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, timeout=20, check=False)
+        completed = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, timeout=20, check=False)
         self.assertEqual(completed.returncode, 0, "isolated import must not load model or product service modules")
+
+    def test_isolated_probe_disables_bytecode_in_child_argv(self):
+        # Parent -B is not inherited; -I ignores PYTHONDONTWRITEBYTECODE.
+        # Never create bytecode in the frozen --target runtime during this test.
+        with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.test_no_ml_or_product_service_import()
+        self.assertEqual(run.call_args.args[0][:4], [sys.executable, "-I", "-B", "-c"])
 
     def test_bounded_child_output(self):
         with patch.object(module, "MAX_OUTPUT_BYTES", 1024):
