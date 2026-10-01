@@ -94,7 +94,8 @@ jobs:
             $hash = (Get-FileHash -LiteralPath $paths[$i] -Algorithm SHA256).Hash.ToLowerInvariant()
             "$($names[$i])=$hash" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
           }
-          if (-not (Select-String -LiteralPath desktop/Cargo.toml -Pattern '^rust-version = "1\.77"$' -Quiet)) { throw "DESKTOP_MSRV_MISMATCH" }
+          $desktopMsrvPattern = if ("${{ inputs.desktop_inspection_scope }}" -eq 'workspace_cleanup_diagnostic') { '^rust-version = "1\.77"$' } else { '^rust-version = "1\.88"$' }
+          if (-not (Select-String -LiteralPath desktop/Cargo.toml -Pattern $desktopMsrvPattern -Quiet)) { throw "DESKTOP_MSRV_MISMATCH" }
           "DESKTOP_INSPECTION_ONLY_TESTED_SHA: $head"
 
       - name: Set up existing BridgeHost test interpreter only
