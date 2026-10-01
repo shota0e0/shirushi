@@ -492,7 +492,7 @@ pub mod native_inventory {
                 .map_err(|_| "observer_thread_panicked")?
         }
     }
-    pub struct NativeInventoryCanary(Arc<Observer>);
+    pub struct NativeInventoryCanary(pub(super) Arc<Observer>);
     impl NativeInventoryCanary {
         pub fn finish(self) -> Result<NativeModuleInventory, &'static str> {
             self.0.finish()
