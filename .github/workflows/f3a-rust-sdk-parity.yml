@@ -180,15 +180,17 @@ jobs:
           if ((git rev-parse HEAD) -ne '${{ github.sha }}') { throw 'SOURCE_IDENTITY_MISMATCH' }
           git config --local core.autocrlf false
           if ($LASTEXITCODE -ne 0) { throw 'SCOPED_GIT_CONFIG_FAILED' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $locks = @{
             'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
             'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
           }
           foreach ($path in $locks.Keys) {
-            git -c core.autocrlf=false -c core.eol=lf checkout-index --force -- $path
-            if ($LASTEXITCODE -ne 0) { throw 'LOCK_MATERIALIZATION_FAILED' }
             $blob = git rev-parse "HEAD:$path"
             if ($LASTEXITCODE -ne 0) { throw 'LOCK_BLOB_FAILED' }
+            if ($path -eq 'desktop/Cargo.lock' -and $blob -ne 'cbfdaabcaea09497feba169e934af93941678c3e') { throw 'DESKTOP_LOCK_BLOB_MISMATCH' }
             $start = [System.Diagnostics.ProcessStartInfo]::new('git')
             $start.UseShellExecute = $false
             $start.RedirectStandardOutput = $true
@@ -197,11 +199,21 @@ jobs:
             $m = [System.IO.MemoryStream]::new()
             $p.StandardOutput.BaseStream.CopyTo($m); $p.WaitForExit()
             if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
-            $rawHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($m.ToArray())).ToLowerInvariant()
+            $rawBytes = $m.ToArray()
+            $rawHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($rawBytes)).ToLowerInvariant()
             $m.Dispose(); $p.Dispose()
-            if ($rawHash -ne $locks[$path] -or (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -ne $rawHash) { throw 'FROZEN_LOCK_MISMATCH' }
-            "LOCK_EVIDENCE: $path blob=$blob raw_sha256=$rawHash"
+            if ($rawHash -ne $locks[$path]) { throw 'FROZEN_RAW_LOCK_MISMATCH' }
+            # Canonical Git payload only: no text conversion or index update.
+            [System.IO.File]::WriteAllBytes((Join-Path $PWD $path), $rawBytes)
+            $workingBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($workingBytes)).ToLowerInvariant()
+            $exact = [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($rawBytes, $workingBytes)
+            if (!$exact -or $workingHash -ne $locks[$path]) { throw 'FROZEN_LOCK_MATERIALIZATION_MISMATCH' }
+            "LOCK_EVIDENCE: $path blob=$blob raw_sha256=$rawHash working_sha256=$workingHash bytes=$($workingBytes.Length) raw_bytes_equal=$exact"
           }
+          $indexAfter = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($indexAfter -ne $indexBefore) { throw 'LOCK_MATERIALIZATION_INDEX_CHANGED' }
+          "LOCK_INDEX_EVIDENCE: before=$indexBefore after=$indexAfter unchanged=true"
           $fixture = Get-Item -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png'
           if ($fixture.Length -ne 319495 -or (Get-FileHash -LiteralPath $fixture.FullName).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_MISMATCH' }
           'TESTED_SOURCE_COMMIT: ${{ github.sha }}'
@@ -304,8 +316,32 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if ((Get-FileHash -LiteralPath 'desktop/Cargo.lock').Hash.ToLowerInvariant() -ne 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069') { throw 'DESKTOP_LOCK_CHANGED' }
-          if ((Get-FileHash -LiteralPath 'tools/f3a-rust-sdk-parity/Cargo.lock').Hash.ToLowerInvariant() -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'HELPER_LOCK_CHANGED' }
+          $ErrorActionPreference = 'Stop'
+          $locks = @{
+            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+          }
+          foreach ($path in $locks.Keys) {
+            $blob = git rev-parse "HEAD:$path"
+            if ($LASTEXITCODE -ne 0) { throw 'FINAL_LOCK_BLOB_FAILED' }
+            if ($path -eq 'desktop/Cargo.lock' -and $blob -ne 'cbfdaabcaea09497feba169e934af93941678c3e') { throw 'FINAL_DESKTOP_LOCK_BLOB_MISMATCH' }
+            $start = [System.Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($blob)
+            $p = [System.Diagnostics.Process]::Start($start)
+            $m = [System.IO.MemoryStream]::new()
+            $p.StandardOutput.BaseStream.CopyTo($m); $p.WaitForExit()
+            if ($p.ExitCode -ne 0) { throw 'FINAL_RAW_LOCK_READ_FAILED' }
+            $rawBytes = $m.ToArray()
+            $m.Dispose(); $p.Dispose()
+            $rawHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($rawBytes)).ToLowerInvariant()
+            $workingBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($workingBytes)).ToLowerInvariant()
+            $exact = [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($rawBytes, $workingBytes)
+            if ($rawHash -ne $locks[$path] -or $workingHash -ne $locks[$path] -or !$exact) { throw 'FINAL_CANONICAL_LOCK_CHANGED' }
+            "FINAL_LOCK_EVIDENCE: $path blob=$blob raw_sha256=$rawHash working_sha256=$workingHash raw_bytes_equal=$exact"
+          }
           if ((Get-FileHash -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png').Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
           $mode = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' } else { 'REAL_HELPER_FIXED_PATH_CANARY' }
           $bridgeScope = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'Helper runtime Python children = 0 required; Python CI evidence tools RUN; BridgeHost Python process/library gates unchanged and NOT RUN' } else { 'BridgeHost Python process/library gates: unchanged in existing desktop_inspection_only, NOT RUN in this no-Python Canary' }
