@@ -13,6 +13,10 @@ on:
         description: CI-only real helper fixed-path identity Canary; artifact upload 0
         type: boolean
         default: false
+      release_helper_native_inventory_canary:
+        description: CI-only default-release helper and bounded native inventory; artifact upload 0
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,7 +27,7 @@ concurrency:
 
 jobs:
   sdk_parity:
-    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && inputs.real_helper_fixed_path_canary)
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary))
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -128,7 +132,8 @@ jobs:
           'ARTIFACT_UPLOAD_COUNT: 0; NO PRODUCTION ADOPTION'
 
   real_helper_fixed_path_canary:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.real_helper_fixed_path_canary
+    name: ${{ inputs.release_helper_native_inventory_canary && 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' || 'real_helper_fixed_path_canary' }}
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -138,6 +143,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ inputs.release_helper_native_inventory_canary && '0' || '1' }} # Release baseline comparison only.
+
+      - name: Check mutually exclusive Canary selection
+        shell: pwsh
+        run: |
+          if ('${{ inputs.real_helper_fixed_path_canary }}' -eq 'true' -and '${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { throw 'CONFLICTING_CANARY_MODES' }
 
       - name: Verify canonical frozen locks and fixture before Cargo
         shell: pwsh
@@ -180,7 +191,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $rust = rustc --version; if ($LASTEXITCODE -ne 0 -or -not $rust.StartsWith('rustc 1.97.1 ')) { throw 'RUST_MISMATCH' }
           $cargo = cargo --version; if ($LASTEXITCODE -ne 0 -or -not $cargo.StartsWith('cargo 1.97.1 ')) { throw 'CARGO_MISMATCH' }
-          "RUST: $rust"; "CARGO: $cargo"; 'TARGET: x86_64-pc-windows-msvc; PROFILE: debug; MSRV: NOT PROVEN'
+          $profile = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'default release' } else { 'debug' }
+          "RUST: $rust"; "CARGO: $cargo"; "TARGET: x86_64-pc-windows-msvc; PROFILE: $profile; MSRV: NOT PROVEN"
           cargo fetch --locked --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fetch --locked --manifest-path desktop/Cargo.toml
@@ -203,14 +215,22 @@ jobs:
           if ($tree.Count -ne 240 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'FOOTPRINT_MISMATCH' }
           if (@($active | Where-Object name -Match '^(reqwest|ureq|wstd|openssl|openssl-sys|ring|aws-lc-sys|cc|sha2-asm)$').Count) { throw 'BACKEND_MISMATCH' }
           'HELPER_FEATURES: c2pa0.85.0; default-features=false; rust_native_crypto only; Windows packages240/build scripts26'
-          cargo build --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --bin shirushi-inspection-helper
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') {
+            python -B -m unittest discover -s tests -p test_inspect_f3a_release_helper.py -v
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python -B scripts/inspect_f3a_release_helper.py build --root '${{ github.workspace }}' --output '${{ runner.temp }}/release-build-evidence.json'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            cargo build --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --bin shirushi-inspection-helper
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Freeze trusted manifest outside tested package trees
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $helper = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/debug/shirushi-inspection-helper.exe'
+          $profile = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'release' } else { 'debug' }
+          $helper = Join-Path $env:CARGO_TARGET_DIR "x86_64-pc-windows-msvc/$profile/shirushi-inspection-helper.exe"
           $size = (Get-Item -LiteralPath $helper).Length
           $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
           $trusted = Join-Path '${{ runner.temp }}' 'real-helper-trusted-build-input'
@@ -226,13 +246,29 @@ jobs:
           "SHIRUSHI_CANARY_HELPER_SHA256=$sha" >> $env:GITHUB_ENV
           "HELPER_SIZE: $size"; "HELPER_SHA256: $sha"; "MANIFEST_RAW_SHA256: $digest"; 'PROTOCOL_VERSION: 1'
 
+      - name: Inspect candidate release PE without executing it
+        if: inputs.release_helper_native_inventory_canary
+        shell: pwsh
+        run: |
+          python -B scripts/inspect_f3a_release_helper.py inspect --root '${{ github.workspace }}' --helper $env:SHIRUSHI_CANARY_BUILT_HELPER --output '${{ runner.temp }}/release-binary-evidence.json'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run real helper positive and bounded negative identity Canary
         shell: pwsh
         env:
           RUSTFLAGS: --cfg shirushi_real_helper_canary
         run: |
-          cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test real_inspection_helper -- --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') {
+            # This cfg affects only the Desktop debug test observer, never helper codegen.
+            $env:RUSTFLAGS += ' --cfg shirushi_release_helper_native_inventory'
+            cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test real_inspection_helper -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath '${{ runner.temp }}/release-helper-integration.log'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python -B scripts/inspect_f3a_release_helper.py compare --binary-evidence '${{ runner.temp }}/release-binary-evidence.json' --test-log '${{ runner.temp }}/release-helper-integration.log'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test real_inspection_helper -- --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Run accepted supervisor regressions without Python runtime
         shell: pwsh
@@ -249,5 +285,10 @@ jobs:
           if ((Get-FileHash -LiteralPath 'desktop/Cargo.lock').Hash.ToLowerInvariant() -ne 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069') { throw 'DESKTOP_LOCK_CHANGED' }
           if ((Get-FileHash -LiteralPath 'tools/f3a-rust-sdk-parity/Cargo.lock').Hash.ToLowerInvariant() -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'HELPER_LOCK_CHANGED' }
           if ((Get-FileHash -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png').Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
-          @('REAL_HELPER_FIXED_PATH_CANARY', 'Exact targets: real_inspection_helper; default and manual-canary inspection_supervisor', 'BridgeHost Python process/library gates: unchanged in existing desktop_inspection_only, NOT RUN in this no-Python Canary', 'Parked limited-canary binary tests: NOT RUN', 'Package/installer generation: NOT RUN (ephemeral test trees only)', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+          $mode = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' } else { 'REAL_HELPER_FIXED_PATH_CANARY' }
+          $bridgeScope = if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { 'Helper runtime Python children = 0 required; Python CI evidence tools RUN; BridgeHost Python process/library gates unchanged and NOT RUN' } else { 'BridgeHost Python process/library gates: unchanged in existing desktop_inspection_only, NOT RUN in this no-Python Canary' }
+          @($mode, 'Exact targets: real_inspection_helper; default and manual-canary inspection_supervisor', $bridgeScope, 'Parked limited-canary binary tests: NOT RUN', 'Package/installer generation: NOT RUN (ephemeral test trees only)', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+          if ('${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') {
+            @('Profile: Cargo default release; no custom codegen/linker policy', 'Native evidence: PE plus bounded post-resume owned-helper module samples; not exhaustive dynamic-load/network proof', 'License/notice closure: DISTRIBUTION_REVIEW_REQUIRED', 'Declared MSRV: NOT PROVEN; separate future Gate') >> $env:GITHUB_STEP_SUMMARY
+          }
           'ARTIFACT_UPLOAD_COUNT: 0'

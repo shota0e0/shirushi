@@ -319,6 +319,10 @@ fn real_helper_fixed_fixture_end_to_end() {
     let package = t.preflight().unwrap();
     let configuration = package.configuration();
     let control = Control::new(id());
+    #[cfg(shirushi_release_helper_native_inventory)]
+    let native_inventory = package
+        .observe_native_modules_for_canary(control.clone())
+        .expect("native inventory canary could not arm");
     // Explicit test-only budget; Production deadline remains BENCHMARK_REQUIRED.
     let report = inspect(
         &configuration,
@@ -328,6 +332,28 @@ fn real_helper_fixed_fixture_end_to_end() {
         Duration::from_secs(30),
         Duration::from_secs(5),
     );
+    #[cfg(shirushi_release_helper_native_inventory)]
+    {
+        // Join and release the owned noninheritable process duplicate BEFORE any
+        // assertion or private-tree cleanup. Drop also joins on an inspect panic.
+        let evidence = native_inventory
+            .finish()
+            .expect("native inventory worker failed");
+        println!(
+            "RELEASE_HELPER_MODULES: {}",
+            serde_json::to_string(&evidence).unwrap()
+        );
+        println!("RELEASE_HELPER_MODULE_WINDOW: post-resume live owned-helper PSAPI snapshots only; capped at 30s/256 modules; loader races, datafile mappings, and between-sample loads/unloads remain unproven; categories describe location/name, not provenance or license; no network observation");
+        assert!(
+            evidence.sampled_post_resume && evidence.successful_samples > 0,
+            "insufficient live post-resume module evidence (empty/fast-exit is not PASS)"
+        );
+        assert!(evidence.handle_closed);
+        assert!(evidence
+            .modules
+            .iter()
+            .any(|m| m.category == "OWN_HELPER" && m.basename == HELPER_BASENAME));
+    }
     assert!(package.process_identity_verified());
     assert!(package.process_identity_failure().is_none());
     assert!(report.reaped);

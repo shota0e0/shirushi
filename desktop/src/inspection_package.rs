@@ -1,5 +1,6 @@
 //! DEVELOPMENT CANARY ONLY: trusted Rust test injection, not Production discovery.
 //! Exact-package integrity is not publisher authenticity or kernel image-section proof.
+#![allow(unexpected_cfgs)] // Explicit CI cfg; no Cargo feature/dependency surface.
 use crate::inspection_supervisor::FixedExecutable;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -214,6 +215,8 @@ pub(crate) struct VerifiedHelper {
     id: FileIdentity,
     checked: AtomicBool,
     failed: AtomicBool,
+    #[cfg(shirushi_release_helper_native_inventory)]
+    native_inventory: std::sync::Mutex<Option<Arc<native_inventory::Observer>>>,
 }
 impl VerifiedHelper {
     pub(crate) fn begin(&self) {
@@ -246,6 +249,17 @@ impl VerifiedHelper {
         let ok = check().is_ok();
         self.checked.store(ok, Ordering::SeqCst);
         self.failed.store(!ok, Ordering::SeqCst);
+        #[cfg(shirushi_release_helper_native_inventory)]
+        if ok {
+            let observation = self
+                .native_inventory
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(observer) = observation.as_ref() {
+                // Observation failure never changes the identity/supervisor outcome.
+                observer.seed(child, self.path.clone());
+            }
+        }
         ok
     }
 }
@@ -295,6 +309,8 @@ impl CanaryPackage {
             id,
             checked: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            #[cfg(shirushi_release_helper_native_inventory)]
+            native_inventory: std::sync::Mutex::new(None),
         })))
     }
     pub fn configuration(&self) -> FixedExecutable {
@@ -309,10 +325,345 @@ impl CanaryPackage {
             .load(Ordering::SeqCst)
             .then_some(PackageFailure::ProcessIdentityUnverified)
     }
+    /// Explicit CI-only evidence. The guard must be finished after inspect returns;
+    /// dropping it also stops and joins the worker. No runtime environment opt-in.
+    #[cfg(shirushi_release_helper_native_inventory)]
+    #[doc(hidden)]
+    pub fn observe_native_modules_for_canary(
+        &self,
+        control: crate::inspection_supervisor::Control,
+    ) -> Result<native_inventory::NativeInventoryCanary, &'static str> {
+        let mut slot = self
+            .0
+            .native_inventory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() || control.has_started() {
+            return Err("observer_already_armed_or_started");
+        }
+        let observer = Arc::new(native_inventory::Observer::new(control));
+        *slot = Some(observer.clone());
+        Ok(native_inventory::NativeInventoryCanary(observer))
+    }
     /// Trusted Rust negative-test injection ONLY; deliberately mismatches two
     /// independently verified package files. Absent from all release builds.
     #[doc(hidden)]
     pub fn mismatched_identity_configuration_for_canary(&self, other: &Self) -> FixedExecutable {
         FixedExecutable::verified_canary(self.0.path.clone(), other.0.clone())
+    }
+}
+
+// Compiled only in the debug Windows package module AND this explicit CI cfg.
+// No production discovery, arbitrary PID, process enumeration, or OpenProcess.
+#[cfg(shirushi_release_helper_native_inventory)]
+pub mod native_inventory {
+    use super::*;
+    use crate::inspection_supervisor::Control;
+    use serde::Serialize;
+    use std::{
+        collections::BTreeSet,
+        os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle},
+        sync::Mutex,
+        thread::{self, JoinHandle},
+        time::{Duration, Instant},
+    };
+    const MAX_MODULES: usize = 256;
+    const MAX_WINDOW: Duration = Duration::from_secs(30);
+    type Worker = JoinHandle<Result<NativeModuleInventory, &'static str>>;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn DuplicateHandle(
+            source_process: *mut c_void,
+            source: *mut c_void,
+            target_process: *mut c_void,
+            target: *mut *mut c_void,
+            access: u32,
+            inherit: i32,
+            options: u32,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn GetLastError() -> u32;
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        fn K32EnumProcessModulesEx(
+            process: *mut c_void,
+            modules: *mut *mut c_void,
+            bytes: u32,
+            needed: *mut u32,
+            filter: u32,
+        ) -> i32;
+        fn K32GetModuleFileNameExW(
+            process: *mut c_void,
+            module: *mut c_void,
+            name: *mut u16,
+            size: u32,
+        ) -> u32;
+    }
+    #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct NativeModule {
+        pub basename: String,
+        pub category: &'static str,
+    }
+    #[derive(Serialize)]
+    pub struct NativeModuleInventory {
+        pub sampled_post_resume: bool,
+        pub successful_samples: u32,
+        pub failed_samples: u32,
+        pub partial_copy_samples: u32,
+        pub incomplete_samples: u32,
+        pub errors: BTreeSet<u32>,
+        pub observation_duration_ms: u64,
+        pub handle_closed: bool,
+        pub modules: BTreeSet<NativeModule>,
+    }
+    pub(crate) struct Observer {
+        control: Control,
+        stop: Arc<AtomicBool>,
+        worker: Mutex<Option<Result<Worker, &'static str>>>,
+    }
+    impl Observer {
+        pub(super) fn new(control: Control) -> Self {
+            Self {
+                control,
+                stop: Arc::new(AtomicBool::new(false)),
+                worker: Mutex::new(None),
+            }
+        }
+        pub(super) fn seed(&self, child: &Child, helper: PathBuf) {
+            let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+            if worker.is_some() {
+                return;
+            }
+            let start = || -> Result<Worker, &'static str> {
+                let mut raw = std::ptr::null_mut();
+                // Same owned process object; reduced query/read/synchronize rights,
+                // noninheritable duplicate. No PID resolution or handle logging.
+                let current = unsafe { GetCurrentProcess() };
+                if unsafe {
+                    DuplicateHandle(
+                        current,
+                        child.as_raw_handle(),
+                        current,
+                        &mut raw,
+                        0x00100410,
+                        0,
+                        0,
+                    )
+                } == 0
+                {
+                    return Err("owned_handle_duplicate_failed");
+                }
+                // SAFETY: successful duplicate transfers one live unique handle.
+                let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+                let mut flags = 0;
+                if unsafe { GetHandleInformation(handle.as_raw_handle(), &mut flags) } == 0
+                    || flags & 1 != 0
+                {
+                    return Err("owned_handle_not_noninheritable");
+                }
+                let control = self.control.clone();
+                let stop = self.stop.clone();
+                thread::Builder::new()
+                    .name("canary-native-inventory".into())
+                    .spawn(move || {
+                        let result = observe(&handle, &helper, &control, &stop);
+                        // OwnedHandle still closes automatically on unwind. On the
+                        // normal route record explicit close success before returning.
+                        let closed = unsafe { CloseHandle(handle.into_raw_handle()) } != 0;
+                        if !closed {
+                            return Err("owned_handle_close_failed");
+                        }
+                        result.map(|mut evidence| {
+                            evidence.handle_closed = true;
+                            evidence
+                        })
+                    })
+                    .map_err(|_| "observer_thread_spawn_failed")
+            };
+            *worker = Some(start());
+        }
+        fn finish(&self) -> Result<NativeModuleInventory, &'static str> {
+            self.stop.store(true, Ordering::SeqCst);
+            let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
+            worker
+                .ok_or("observer_never_seeded")??
+                .join()
+                .map_err(|_| "observer_thread_panicked")?
+        }
+    }
+    pub struct NativeInventoryCanary(Arc<Observer>);
+    impl NativeInventoryCanary {
+        pub fn finish(self) -> Result<NativeModuleInventory, &'static str> {
+            self.0.finish()
+        }
+    }
+    impl Drop for NativeInventoryCanary {
+        fn drop(&mut self) {
+            let _ = self.0.finish();
+        }
+    }
+    fn system_directory() -> Option<PathBuf> {
+        let mut buffer = vec![0u16; 32768];
+        let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        (len > 0 && len < buffer.len()).then(|| PathBuf::from(OsString::from_wide(&buffer[..len])))
+    }
+    fn same_path(left: &Path, right: &Path) -> bool {
+        match (left.to_str(), right.to_str()) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        }
+    }
+    fn module_record(path: &Path, helper: &Path, system: Option<&Path>) -> Option<NativeModule> {
+        let basename = path.file_name()?.to_str()?.to_ascii_lowercase();
+        // Log-safe basename only. Unexpected names make that sample incomplete.
+        if basename.is_empty()
+            || basename.len() > 128
+            || !basename
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            return None;
+        }
+        let category = if same_path(path, helper) {
+            "OWN_HELPER"
+        } else if ["vcruntime", "msvcp", "concrt"]
+            .iter()
+            .any(|p| basename.starts_with(p))
+        {
+            // Location is not evidence that a VC runtime is OS-provided.
+            "VC_RUNTIME"
+        } else if system
+            .map(|s| path.parent().map(|p| same_path(p, s)).unwrap_or(false))
+            .unwrap_or(false)
+        {
+            "WINDOWS_SYSTEM"
+        } else if system.is_some() {
+            "OTHER_NON_SYSTEM"
+        } else {
+            "UNKNOWN"
+        };
+        Some(NativeModule { basename, category })
+    }
+    fn observe(
+        handle: &OwnedHandle,
+        helper: &Path,
+        control: &Control,
+        stop: &AtomicBool,
+    ) -> Result<NativeModuleInventory, &'static str> {
+        let started = Instant::now();
+        let system = system_directory();
+        let mut evidence = NativeModuleInventory {
+            sampled_post_resume: false,
+            successful_samples: 0,
+            failed_samples: 0,
+            partial_copy_samples: 0,
+            incomplete_samples: 0,
+            errors: BTreeSet::new(),
+            observation_duration_ms: 0,
+            handle_closed: false,
+            modules: BTreeSet::new(),
+        };
+        let mut modules = vec![std::ptr::null_mut(); MAX_MODULES];
+        let mut name = vec![0u16; 32768];
+        while !stop.load(Ordering::SeqCst) && started.elapsed() < MAX_WINDOW {
+            // The existing marker is set only AFTER successful ResumeThread. No
+            // suspended/preloader sample can count as runtime evidence.
+            if !control.has_started() {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+                0 => break, // owned process already exited
+                258 => {}   // WAIT_TIMEOUT: still live, sample without waiting
+                _ => return Err("owned_process_wait_failed"),
+            }
+            let mut needed = 0;
+            let capacity = (modules.len() * size_of::<*mut c_void>()) as u32;
+            let enumerated = unsafe {
+                K32EnumProcessModulesEx(
+                    handle.as_raw_handle(),
+                    modules.as_mut_ptr(),
+                    capacity,
+                    &mut needed,
+                    3,
+                )
+            } != 0;
+            if !enumerated {
+                let error = unsafe { GetLastError() };
+                evidence.failed_samples += 1;
+                evidence.partial_copy_samples += u32::from(error == 299);
+                // Bound distinct error output too; numeric categories only.
+                if evidence.errors.len() < 16 {
+                    evidence.errors.insert(error);
+                }
+            } else if needed == 0
+                || needed > capacity
+                || needed as usize % size_of::<*mut c_void>() != 0
+            {
+                evidence.failed_samples += 1;
+                evidence.incomplete_samples += 1;
+            } else {
+                let count = needed as usize / size_of::<*mut c_void>();
+                let mut sample = BTreeSet::new();
+                let mut complete = true;
+                for module in &modules[..count] {
+                    if stop.load(Ordering::SeqCst) || started.elapsed() >= MAX_WINDOW {
+                        complete = false;
+                        break;
+                    }
+                    let len = unsafe {
+                        K32GetModuleFileNameExW(
+                            handle.as_raw_handle(),
+                            *module,
+                            name.as_mut_ptr(),
+                            name.len() as u32,
+                        )
+                    } as usize;
+                    if len == 0 {
+                        let error = unsafe { GetLastError() };
+                        evidence.partial_copy_samples += u32::from(error == 299);
+                        if evidence.errors.len() < 16 {
+                            evidence.errors.insert(error);
+                        }
+                        complete = false;
+                        break;
+                    }
+                    if len >= name.len() - 1 {
+                        complete = false;
+                        break;
+                    }
+                    let path = PathBuf::from(OsString::from_wide(&name[..len]));
+                    if let Some(record) = module_record(&path, helper, system.as_deref()) {
+                        sample.insert(record);
+                    } else {
+                        complete = false;
+                        break;
+                    }
+                }
+                // A process may exit/load/unload during PSAPI reads. Count only
+                // complete live observations including this exact helper path.
+                if complete
+                    && sample.iter().any(|m| m.category == "OWN_HELPER")
+                    && unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == 258
+                {
+                    if evidence.modules.union(&sample).count() > MAX_MODULES {
+                        return Err("module_union_cap_exceeded");
+                    }
+                    evidence.modules.extend(sample);
+                    evidence.successful_samples += 1;
+                    evidence.sampled_post_resume = true;
+                } else {
+                    evidence.failed_samples += 1;
+                    evidence.incomplete_samples += 1;
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        evidence.observation_duration_ms =
+            started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        // Missing runtime observations are rejected by the test; retain counts
+        // here so a fast-exit/loader-transient gap is visible in the evidence.
+        Ok(evidence)
     }
 }
