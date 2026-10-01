@@ -17,6 +17,10 @@ on:
         description: CI-only default-release helper and bounded native inventory; artifact upload 0
         type: boolean
         default: false
+      desktop_lock_byte_identity_only:
+        description: Diagnose frozen Desktop lock checkout bytes only; no Cargo or artifacts
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,7 +31,7 @@ concurrency:
 
 jobs:
   sdk_parity:
-    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary))
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only))
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -133,7 +137,7 @@ jobs:
 
   real_helper_fixed_path_canary:
     name: ${{ inputs.release_helper_native_inventory_canary && 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' || 'real_helper_fixed_path_canary' }}
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_lock_byte_identity_only && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -310,3 +314,150 @@ jobs:
             @('Profile: Cargo default release; no custom codegen/linker policy', 'Native evidence: PE plus bounded post-resume owned-helper module samples; not exhaustive dynamic-load/network proof', 'License/notice closure: DISTRIBUTION_REVIEW_REQUIRED', 'Declared MSRV: NOT PROVEN; separate future Gate') >> $env:GITHUB_STEP_SUMMARY
           }
           'ARTIFACT_UPLOAD_COUNT: 0'
+
+  desktop_lock_byte_identity_only:
+    name: DESKTOP_LOCK_BYTE_IDENTITY_ONLY
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.desktop_lock_byte_identity_only
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Reject conflicting diagnostic and Canary modes
+        shell: pwsh
+        run: |
+          if ('${{ inputs.real_helper_fixed_path_canary }}' -eq 'true' -or '${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { throw 'CONFLICTING_DIAGNOSTIC_MODES' }
+
+      - name: Check out exact diagnostic source without lock rematerialization
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: f9316a98639f86817000433712b63b4a0c9636b7
+          persist-credentials: false
+
+      - name: Record initial bytes and bounded materialization observations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Read-RawBlob([string]$oid) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $start.ArgumentList.Add('cat-file')
+            $start.ArgumentList.Add('blob')
+            $start.ArgumentList.Add($oid)
+            $process = [System.Diagnostics.Process]::Start($start)
+            $memory = [System.IO.MemoryStream]::new()
+            try {
+              $process.StandardOutput.BaseStream.CopyTo($memory)
+              $null = $process.StandardError.ReadToEnd()
+              $process.WaitForExit()
+              if ($process.ExitCode -ne 0) { throw 'RAW_BLOB_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $process.Dispose() }
+          }
+          function Get-ByteFacts([byte[]]$bytes) {
+            $lf = 0; $crlf = 0; $crOnly = 0
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+              if ($bytes[$i] -eq 10) { $lf++ }
+              if ($bytes[$i] -eq 13) {
+                if ($i + 1 -lt $bytes.Length -and $bytes[$i + 1] -eq 10) { $crlf++ } else { $crOnly++ }
+              }
+            }
+            return [ordered]@{
+              byte_length = $bytes.Length
+              sha256 = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+              lf_byte_count = $lf; crlf_sequence_count = $crlf; cr_only_count = $crOnly
+              final_byte = $(if ($bytes.Length) { [int]$bytes[-1] } else { $null })
+              eof_newline = $(if (!$bytes.Length) { 'EMPTY' } elseif ($bytes[-1] -eq 10) { if ($bytes.Length -gt 1 -and $bytes[-2] -eq 13) { 'CRLF' } else { 'LF' } } elseif ($bytes[-1] -eq 13) { 'CR' } else { 'NONE' })
+            }
+          }
+          function Test-RawEqual([byte[]]$left, [byte[]]$right) {
+            return [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($left, $right)
+          }
+          function Get-EolComparisonBytes([byte[]]$bytes) {
+            # Comparison only; never used to hash, materialize, or accept identity.
+            $result = [System.Collections.Generic.List[byte]]::new()
+            for ($i = 0; $i -lt $bytes.Length; $i++) {
+              if ($bytes[$i] -eq 13) {
+                $result.Add(10)
+                if ($i + 1 -lt $bytes.Length -and $bytes[$i + 1] -eq 10) { $i++ }
+              } else { $result.Add($bytes[$i]) }
+            }
+            return ,$result.ToArray()
+          }
+          function Get-Comparison([byte[]]$raw, [byte[]]$working) {
+            $first = $null
+            for ($i = 0; $i -lt [Math]::Min($raw.Length, $working.Length); $i++) {
+              if ($raw[$i] -ne $working[$i]) { $first = $i; break }
+            }
+            if ($null -eq $first -and $raw.Length -ne $working.Length) { $first = [Math]::Min($raw.Length, $working.Length) }
+            return [ordered]@{
+              raw_bytes_equal = (Test-RawEqual $raw $working)
+              content_equal_except_eol = (Test-RawEqual (Get-EolComparisonBytes $raw) (Get-EolComparisonBytes $working))
+              first_differing_byte_offset = $first
+            }
+          }
+          $source = 'f9316a98639f86817000433712b63b4a0c9636b7'
+          if ((git rev-parse HEAD) -ne $source -or $LASTEXITCODE -ne 0) { throw 'DIAGNOSTIC_SOURCE_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+          $desktopPath = 'desktop/Cargo.lock'
+          $helperPath = 'tools/f3a-rust-sdk-parity/Cargo.lock'
+          $desktopOid = (git rev-parse "HEAD:$desktopPath").Trim()
+          if ($LASTEXITCODE -ne 0 -or $desktopOid -ne 'cbfdaabcaea09497feba169e934af93941678c3e') { throw 'DESKTOP_BLOB_OID_MISMATCH' }
+          $helperOid = (git rev-parse "HEAD:$helperPath").Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'HELPER_BLOB_OID_UNAVAILABLE' }
+          $desktopRaw = Read-RawBlob $desktopOid
+          $helperRaw = Read-RawBlob $helperOid
+          $desktopCanonical = Get-ByteFacts $desktopRaw
+          $helperCanonical = Get-ByteFacts $helperRaw
+          if ($desktopCanonical.sha256 -ne 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069') { throw 'DESKTOP_CANONICAL_HASH_MISMATCH' }
+          if ($helperCanonical.sha256 -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'HELPER_CANONICAL_HASH_MISMATCH' }
+          $desktopInitialBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $desktopPath))
+          $helperInitialBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $helperPath))
+          $desktopInitial = Get-ByteFacts $desktopInitialBytes
+          $helperInitial = Get-ByteFacts $helperInitialBytes
+          $initialComparison = Get-Comparison $desktopRaw $desktopInitialBytes
+          $initialEvidence = [ordered]@{
+            workflow_commit = '${{ github.sha }}'; diagnostic_source_commit = $source
+            desktop = [ordered]@{ path=$desktopPath; blob_oid=$desktopOid; canonical=$desktopCanonical; initial_checkout=$desktopInitial; comparison=$initialComparison }
+            helper_control = [ordered]@{ path=$helperPath; blob_oid=$helperOid; canonical=$helperCanonical; initial_checkout=$helperInitial; comparison=(Get-Comparison $helperRaw $helperInitialBytes) }
+          }
+          # Freeze initial observations in the log before any working-file write.
+          'INITIAL_BYTE_EVIDENCE: ' + ($initialEvidence | ConvertTo-Json -Depth 8 -Compress)
+          'INITIAL_LS_FILES_EOL:'
+          git ls-files --eol -- $desktopPath $helperPath
+          if ($LASTEXITCODE -ne 0) { throw 'EOL_QUERY_FAILED' }
+          'INITIAL_ATTRIBUTES_ALL:'
+          git check-attr --all -- $desktopPath $helperPath
+          if ($LASTEXITCODE -ne 0) { throw 'ATTRIBUTE_QUERY_FAILED' }
+          foreach ($key in @('core.autocrlf', 'core.eol', 'core.safecrlf')) {
+            $values = @(git config --show-origin --get-all $key)
+            if ($LASTEXITCODE -eq 1) { "GIT_CONFIG: $key = UNSET" }
+            elseif ($LASTEXITCODE -eq 0) { foreach ($value in $values) { "GIT_CONFIG: $key = $value" } }
+            else { throw 'CONFIG_QUERY_FAILED' }
+          }
+          git -c core.autocrlf=false -c core.eol=lf checkout-index --force -- desktop/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { throw 'CHECKOUT_INDEX_DIAGNOSTIC_FAILED' }
+          $postBytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD $desktopPath))
+          $postEvidence = [ordered]@{ facts=(Get-ByteFacts $postBytes); comparison=(Get-Comparison $desktopRaw $postBytes) }
+          'CHECKOUT_INDEX_BYTE_EVIDENCE: ' + ($postEvidence | ConvertTo-Json -Depth 5 -Compress)
+          $rawTempPath = Join-Path '${{ runner.temp }}' ('desktop-lock-raw-' + [Guid]::NewGuid().ToString('N') + '.bin')
+          # The raw object payload is written only to a separate temporary file.
+          [System.IO.File]::WriteAllBytes($rawTempPath, (Read-RawBlob $desktopOid))
+          $rawTempBytes = [System.IO.File]::ReadAllBytes($rawTempPath)
+          $rawTempEvidence = [ordered]@{ facts=(Get-ByteFacts $rawTempBytes); raw_bytes_equal=(Test-RawEqual $desktopRaw $rawTempBytes) }
+          'RAW_TEMP_BYTE_EVIDENCE: ' + ($rawTempEvidence | ConvertTo-Json -Depth 5 -Compress)
+          if (!$rawTempEvidence.raw_bytes_equal) { throw 'RAW_TEMP_MATERIALIZATION_MISMATCH' }
+          if (!(Test-RawEqual $helperInitialBytes ([System.IO.File]::ReadAllBytes((Join-Path $PWD $helperPath))))) { throw 'HELPER_CONTROL_CHANGED' }
+          if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+          $classification = if ($initialComparison.raw_bytes_equal) { 'CANONICAL_AND_CHECKOUT_BYTES_MATCH' }
+            elseif (!$initialComparison.content_equal_except_eol) { 'DESKTOP_LOCK_NON_EOL_BYTE_DIFFERENCE' }
+            elseif ($desktopCanonical.crlf_sequence_count -eq 0 -and $desktopCanonical.cr_only_count -eq 0 -and $desktopInitial.cr_only_count -eq 0 -and $desktopInitial.crlf_sequence_count -gt 0 -and $desktopInitial.lf_byte_count -eq $desktopCanonical.lf_byte_count -and $desktopInitial.byte_length -eq $desktopCanonical.byte_length + $desktopInitial.crlf_sequence_count) { 'DESKTOP_LOCK_CRLF_CHECKOUT_CONVERSION' }
+            else { 'DESKTOP_LOCK_OTHER_EOL_TRANSFORMATION' }
+          $checkoutIndexResult = if ($postEvidence.comparison.raw_bytes_equal) { 'CHECKOUT_INDEX_CANONICALIZES_CORRECTLY' } else { 'CHECKOUT_INDEX_PRESERVES_OR_REINTRODUCES_CONVERSION' }
+          "CLASSIFICATION: $classification"
+          "CHECKOUT_INDEX_OBSERVATION: $checkoutIndexResult"
+          'HELPER_CONTROL_UNCHANGED: true; INDEX_UNCHANGED: true'
+          'ARTIFACT_UPLOAD_COUNT: 0'
+          @('DESKTOP_LOCK_BYTE_IDENTITY_ONLY', "WORKFLOW_COMMIT: ${{ github.sha }}", "DIAGNOSTIC_SOURCE_COMMIT: $source", "CLASSIFICATION: $classification", "CHECKOUT_INDEX_OBSERVATION: $checkoutIndexResult", 'Cargo/fetch/build/tests/PE/runtime/package: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Candidate Release Helper Canary: NOT RESUMED') >> $env:GITHUB_STEP_SUMMARY
