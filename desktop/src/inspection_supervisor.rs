@@ -135,6 +135,8 @@ pub struct FixedExecutable {
     executable: std::path::PathBuf,
     arguments: Vec<std::ffi::OsString>,
     test_marker: Option<String>,
+    #[cfg(all(windows, debug_assertions))]
+    verified_helper: Option<Arc<crate::inspection_package::VerifiedHelper>>,
 }
 impl std::fmt::Debug for FixedExecutable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -147,6 +149,8 @@ impl FixedExecutable {
             executable,
             arguments: Vec::new(),
             test_marker: None,
+            #[cfg(all(windows, debug_assertions))]
+            verified_helper: None,
         }
     }
     /// Explicit development-only synthetic process fixture configuration.
@@ -160,6 +164,20 @@ impl FixedExecutable {
                 "--nocapture".into(),
             ],
             test_marker: Some(marker.code().to_owned()),
+            #[cfg(all(windows, debug_assertions))]
+            verified_helper: None,
+        }
+    }
+    #[cfg(all(windows, debug_assertions))]
+    pub(crate) fn verified_canary(
+        executable: std::path::PathBuf,
+        guard: Arc<crate::inspection_package::VerifiedHelper>,
+    ) -> Self {
+        Self {
+            executable,
+            arguments: Vec::new(),
+            test_marker: None,
+            verified_helper: Some(guard),
         }
     }
     #[cfg(windows)]
@@ -489,6 +507,7 @@ mod windows {
     /// No shell/CLI passthrough is exposed by the helper itself.
     fn run(
         command: &mut Command,
+        configuration: &FixedExecutable,
         raw: &[u8],
         id: RequestIdentity,
         control: &Control,
@@ -522,6 +541,17 @@ mod windows {
         // SAFETY: live owned child and Job handles; child cannot execute before assignment.
         let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } != 0;
         let ready = if assigned {
+            #[cfg(debug_assertions)]
+            if let Some(guard) = &configuration.verified_helper {
+                if !guard.verify_child(&child) {
+                    Err(ServiceFailure::ServiceUnavailable)
+                } else {
+                    resume(&child)
+                }
+            } else {
+                resume(&child)
+            }
+            #[cfg(not(debug_assertions))]
             resume(&child)
         } else {
             Err(ServiceFailure::ServiceUnavailable)
@@ -780,8 +810,13 @@ mod windows {
             Ok(v) => v,
             Err(e) => return failed(e),
         };
+        #[cfg(debug_assertions)]
+        if let Some(guard) = &configuration.verified_helper {
+            guard.begin();
+        }
         run(
             &mut configuration.command(),
+            configuration,
             &raw,
             id,
             control,

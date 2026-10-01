@@ -8,6 +8,11 @@ on:
       - docs/development/f3a-rust-sdk-parity*
       - .github/workflows/f3a-rust-sdk-parity.yml
   workflow_dispatch:
+    inputs:
+      real_helper_fixed_path_canary:
+        description: CI-only real helper fixed-path identity Canary; artifact upload 0
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ concurrency:
 
 jobs:
   sdk_parity:
-    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity'
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && inputs.real_helper_fixed_path_canary)
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -121,3 +126,128 @@ jobs:
           if ((Get-FileHash -LiteralPath 'tools/f3a-rust-sdk-parity/Cargo.lock' -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'LOCK_CHANGED' }
           if ((Get-FileHash -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
           'ARTIFACT_UPLOAD_COUNT: 0; NO PRODUCTION ADOPTION'
+
+  real_helper_fixed_path_canary:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.real_helper_fixed_path_canary
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: ${{ runner.temp }}/real-helper-canary-target
+    steps:
+      - name: Check out exact Canary source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify canonical frozen locks and fixture before Cargo
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}') { throw 'SOURCE_IDENTITY_MISMATCH' }
+          git config --local core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'SCOPED_GIT_CONFIG_FAILED' }
+          $locks = @{
+            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+          }
+          foreach ($path in $locks.Keys) {
+            git -c core.autocrlf=false -c core.eol=lf checkout-index --force -- $path
+            if ($LASTEXITCODE -ne 0) { throw 'LOCK_MATERIALIZATION_FAILED' }
+            $blob = git rev-parse "HEAD:$path"
+            if ($LASTEXITCODE -ne 0) { throw 'LOCK_BLOB_FAILED' }
+            $start = [System.Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($blob)
+            $p = [System.Diagnostics.Process]::Start($start)
+            $m = [System.IO.MemoryStream]::new()
+            $p.StandardOutput.BaseStream.CopyTo($m); $p.WaitForExit()
+            if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+            $rawHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($m.ToArray())).ToLowerInvariant()
+            $m.Dispose(); $p.Dispose()
+            if ($rawHash -ne $locks[$path] -or (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -ne $rawHash) { throw 'FROZEN_LOCK_MISMATCH' }
+            "LOCK_EVIDENCE: $path blob=$blob raw_sha256=$rawHash"
+          }
+          $fixture = Get-Item -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png'
+          if ($fixture.Length -ne 319495 -or (Get-FileHash -LiteralPath $fixture.FullName).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_MISMATCH' }
+          'TESTED_SOURCE_COMMIT: ${{ github.sha }}'
+
+      - name: Assert pinned Rust and fetch frozen dependencies
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rust = rustc --version; if ($LASTEXITCODE -ne 0 -or -not $rust.StartsWith('rustc 1.97.1 ')) { throw 'RUST_MISMATCH' }
+          $cargo = cargo --version; if ($LASTEXITCODE -ne 0 -or -not $cargo.StartsWith('cargo 1.97.1 ')) { throw 'CARGO_MISMATCH' }
+          "RUST: $rust"; "CARGO: $cargo"; 'TARGET: x86_64-pc-windows-msvc; PROFILE: debug; MSRV: NOT PROVEN'
+          cargo fetch --locked --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fetch --locked --manifest-path desktop/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Assert unchanged SDK footprint and build only real helper
+        shell: pwsh
+        run: |
+          $raw = cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadata = $raw | ConvertFrom-Json
+          $sdk = @($metadata.packages | Where-Object name -EQ 'c2pa')
+          if ($sdk.Count -ne 1 -or $sdk[0].version -ne '0.85.0') { throw 'SDK_VERSION_MISMATCH' }
+          $features = @(($metadata.resolve.nodes | Where-Object id -EQ $sdk[0].id).features)
+          if ($features.Count -ne 1 -or $features[0] -ne 'rust_native_crypto') { throw 'SDK_FEATURE_MISMATCH' }
+          $tree = @(cargo tree --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --prefix none --format '{p}' --no-dedupe | Sort-Object -Unique)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $active = @($metadata.packages | Where-Object { $tree -Match ('^'+[regex]::Escape($_.name+' v'+$_.version)+'(?: |$)') })
+          $scripts = @($active | Where-Object { @($_.targets | Where-Object kind -Contains 'custom-build').Count })
+          if ($tree.Count -ne 240 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'FOOTPRINT_MISMATCH' }
+          if (@($active | Where-Object name -Match '^(reqwest|ureq|wstd|openssl|openssl-sys|ring|aws-lc-sys|cc|sha2-asm)$').Count) { throw 'BACKEND_MISMATCH' }
+          'HELPER_FEATURES: c2pa0.85.0; default-features=false; rust_native_crypto only; Windows packages240/build scripts26'
+          cargo build --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --bin shirushi-inspection-helper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Freeze trusted manifest outside tested package trees
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/debug/shirushi-inspection-helper.exe'
+          $size = (Get-Item -LiteralPath $helper).Length
+          $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          $trusted = Join-Path '${{ runner.temp }}' 'real-helper-trusted-build-input'
+          New-Item -ItemType Directory -Path $trusted -ErrorAction Stop | Out-Null
+          $path = Join-Path $trusted 'inspection-helper.manifest.json'
+          $manifest = [ordered]@{schemaVersion=1; relativePath='shirushi-inspection-helper.exe'; size=$size; sha256=$sha; protocolVersion=1} | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText($path, $manifest, [System.Text.UTF8Encoding]::new($false))
+          $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          # Compiler inputs only: test constants, NOT runtime discovery/env overrides.
+          "SHIRUSHI_CANARY_TRUSTED_MANIFEST=$path" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_BUILT_HELPER=$helper" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_HELPER_SHA256=$sha" >> $env:GITHUB_ENV
+          "HELPER_SIZE: $size"; "HELPER_SHA256: $sha"; "MANIFEST_RAW_SHA256: $digest"; 'PROTOCOL_VERSION: 1'
+
+      - name: Run real helper positive and bounded negative identity Canary
+        shell: pwsh
+        env:
+          RUSTFLAGS: --cfg shirushi_real_helper_canary
+        run: |
+          cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test real_inspection_helper -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run accepted supervisor regressions without Python runtime
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --features manual-canary --test inspection_supervisor -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Recheck frozen inputs and summarize no transport boundary
+        if: always()
+        shell: pwsh
+        run: |
+          if ((Get-FileHash -LiteralPath 'desktop/Cargo.lock').Hash.ToLowerInvariant() -ne 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069') { throw 'DESKTOP_LOCK_CHANGED' }
+          if ((Get-FileHash -LiteralPath 'tools/f3a-rust-sdk-parity/Cargo.lock').Hash.ToLowerInvariant() -ne 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8') { throw 'HELPER_LOCK_CHANGED' }
+          if ((Get-FileHash -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png').Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
+          @('REAL_HELPER_FIXED_PATH_CANARY', 'Exact targets: real_inspection_helper; default and manual-canary inspection_supervisor', 'BridgeHost Python process/library gates: unchanged in existing desktop_inspection_only, NOT RUN in this no-Python Canary', 'Parked limited-canary binary tests: NOT RUN', 'Package/installer generation: NOT RUN (ephemeral test trees only)', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+          'ARTIFACT_UPLOAD_COUNT: 0'

@@ -7,6 +7,9 @@ mod host;
 // Parallel host-owned inspection boundary; not exposed as a Tauri command.
 pub mod inspection_protocol;
 pub mod inspection_supervisor;
+// CI-only package identity Canary. No Production discovery or Tauri command.
+#[cfg(all(windows, debug_assertions))]
+pub mod inspection_package;
 mod protocol;
 
 use host::BridgeHost;
