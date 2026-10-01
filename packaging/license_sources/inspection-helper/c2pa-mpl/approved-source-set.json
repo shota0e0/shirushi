@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "c2pa": {
+    "name": "c2pa",
+    "version": "0.85.0",
+    "tag": "c2pa-v0.85.0",
+    "commit": "3f40cdd22b60bf955d531b0301604e3f257e0a19",
+    "repository": "https://github.com/contentauth/c2pa-rs"
+  },
+  "originalUpstream": {
+    "project": "cryptography-rs/cryptographic-message-syntax",
+    "version": "0.22.0",
+    "tag": "cryptographic-message-syntax/0.22.0",
+    "commit": "c09b693c8a6f9cf7475f1310405632931f9ad12b",
+    "repository": "https://github.com/indygreg/cryptography-rs"
+  },
+  "sourceScope": {
+    "license": "MPL-2.0",
+    "classification": "MODIFIED_COPY"
+  },
+  "files": [
+    {
+      "relativePath": "sdk/src/crypto/asn1/mod.rs",
+      "size": 52740,
+      "sha256": "90d0f896297b63b44986d04214bfdd896bd9f02fd1df47e8abdf86ddc9f4b5b2"
+    },
+    {
+      "relativePath": "sdk/src/crypto/asn1/rfc3161.rs",
+      "size": 15510,
+      "sha256": "1a3974bee08c695c556b897b4381d697bf094bc304e8628881feaa47a55719de"
+    },
+    {
+      "relativePath": "sdk/src/crypto/asn1/rfc3281.rs",
+      "size": 7345,
+      "sha256": "916728217ff7b38d3e6cc4cda1289ab060aad4ee7ed6ee73c06a85b2580c9830"
+    },
+    {
+      "relativePath": "sdk/src/crypto/asn1/rfc4210.rs",
+      "size": 1153,
+      "sha256": "a5206504a011198c59a30fcb7ebf2f85d89d1c4325047808109b383ff308558f"
+    },
+    {
+      "relativePath": "sdk/src/crypto/asn1/rfc5652.rs",
+      "size": 45433,
+      "sha256": "6ed39ddf6e037b2816d5d9a0b154cfc415367f0f82524e2043cb40b2964afc95"
+    }
+  ],
+  "licenseText": {
+    "relativePath": "MPL-2.0.txt",
+    "size": 16726,
+    "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+    "authoritativeSource": "https://www.mozilla.org/media/MPL/2.0/index.txt"
+  }
+}
