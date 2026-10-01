@@ -156,6 +156,24 @@ class PeTests(unittest.TestCase):
         self.assertEqual(record["observedNotStatic"], ["kernelbase.dll", "shirushi-inspection-helper.exe"])
         self.assertIn("not exhaustive", record["limitation"])
 
+    def test_canonical_source_requires_exact_blob_bytes(self):
+        entry = b"100644 blob " + b"a" * 40 + b"\ttools/f3a-rust-sdk-parity/src/lib.rs\0"
+        raw = b"fn main() {}\n"
+        with patch.object(evidence, "run_checked", side_effect=["tree", "tree"]), patch.object(evidence.subprocess, "check_output", side_effect=[entry, raw]), patch.object(Path, "read_bytes", return_value=raw), patch.object(evidence, "emit") as output:
+            evidence.verify_helper_source(Path("root"))
+        self.assertEqual(output.call_args.args[1]["files"][0]["rawSha256"], evidence.sha(raw))
+
+    def test_crlf_materialization_is_not_alternate_accepted_hash(self):
+        entry = b"100644 blob " + b"a" * 40 + b"\ttools/f3a-rust-sdk-parity/src/lib.rs\0"
+        with patch.object(evidence, "run_checked", side_effect=["tree", "tree"]), patch.object(evidence.subprocess, "check_output", side_effect=[entry, b"source\n"]), patch.object(Path, "read_bytes", return_value=b"source\r\n"), patch.object(evidence, "emit"):
+            with self.assertRaisesRegex(ValueError, "MATERIALIZATION_MISMATCH"):
+                evidence.verify_helper_source(Path("root"))
+
+    def test_committed_helper_source_change_is_rejected(self):
+        with patch.object(evidence, "run_checked", side_effect=["approved", "changed"]):
+            with self.assertRaisesRegex(ValueError, "SOURCE_BASELINE_CHANGED"):
+                evidence.verify_helper_source(Path("root"))
+
 
 if __name__ == "__main__":
     unittest.main()

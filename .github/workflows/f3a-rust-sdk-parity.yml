@@ -150,6 +150,24 @@ jobs:
         run: |
           if ('${{ inputs.real_helper_fixed_path_canary }}' -eq 'true' -and '${{ inputs.release_helper_native_inventory_canary }}' -eq 'true') { throw 'CONFLICTING_CANARY_MODES' }
 
+      - name: Materialize accepted helper source as canonical Git bytes
+        if: inputs.release_helper_native_inventory_canary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $approved = git rev-parse 'c5acb3706ea0e38e2dd4d0ccbde93f7fb80ef2ac:tools/f3a-rust-sdk-parity'
+          if ($LASTEXITCODE -ne 0) { throw 'BASELINE_TREE_UNAVAILABLE' }
+          $current = git rev-parse 'HEAD:tools/f3a-rust-sdk-parity'
+          if ($LASTEXITCODE -ne 0 -or $current -ne $approved) { throw 'HELPER_SOURCE_BASELINE_CHANGED' }
+          'HELPER_CHECKOUT_EOL_BEFORE:'
+          git ls-files --eol -- tools/f3a-rust-sdk-parity
+          $paths = @(git ls-files -- tools/f3a-rust-sdk-parity)
+          if ($LASTEXITCODE -ne 0 -or $paths.Count -ne 14) { throw 'HELPER_SOURCE_PATH_COUNT' }
+          git -c core.autocrlf=false -c core.eol=lf checkout-index --force -- $paths
+          if ($LASTEXITCODE -ne 0) { throw 'HELPER_SOURCE_MATERIALIZATION_FAILED' }
+          'HELPER_CHECKOUT_EOL_AFTER:'
+          git ls-files --eol -- tools/f3a-rust-sdk-parity
+
       - name: Verify canonical frozen locks and fixture before Cargo
         shell: pwsh
         run: |

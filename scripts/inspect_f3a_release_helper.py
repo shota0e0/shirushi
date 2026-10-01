@@ -259,10 +259,32 @@ def preflight(root: Path) -> None:
     directories = [cargo_home, root / "tools/f3a-rust-sdk-parity/.cargo"] + [p / ".cargo" for p in [root, *root.parents]]
     if any((p / n).is_file() for p in directories for n in ("config", "config.toml")):
         raise ValueError("CARGO_CONFIGURATION_REQUIRES_REVIEW")
-    # Helper source/config bytes, not only the lock, must equal accepted baseline.
-    changed = run_checked(["git", "diff", "--name-only", BASELINE, "--", "tools/f3a-rust-sdk-parity/"], cwd=root)
-    if changed:
+    verify_helper_source(root)
+
+
+def verify_helper_source(root: Path) -> None:
+    # Separate committed identity from Windows checkout materialization. Never
+    # normalize file bytes or accept alternate EOL hashes at this boundary.
+    prefix = "tools/f3a-rust-sdk-parity"
+    approved = run_checked(["git", "rev-parse", BASELINE + ":" + prefix], cwd=root)
+    current = run_checked(["git", "rev-parse", "HEAD:" + prefix], cwd=root)
+    if approved != current:
         raise ValueError("HELPER_SOURCE_BASELINE_CHANGED")
+    entries = subprocess.check_output(["git", "ls-tree", "-r", "-z", "HEAD", "--", prefix], cwd=root).split(b"\0")
+    facts = []
+    for entry in filter(None, entries):
+        identity, path = entry.split(b"\t", 1)
+        mode, kind, oid = identity.split(b" ")
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            raise ValueError("HELPER_SOURCE_OBJECT_TYPE")
+        raw = subprocess.check_output(["git", "cat-file", "blob", oid.decode("ascii")], cwd=root)
+        name = path.decode("utf-8")
+        checkout = (root / name).read_bytes()
+        if checkout != raw:
+            emit("SOURCE_BYTE_MISMATCH", dict(path=name, rawSha256=sha(raw), checkoutSha256=sha(checkout)))
+            raise ValueError("HELPER_SOURCE_MATERIALIZATION_MISMATCH")
+        facts.append(dict(path=name, blob=oid.decode("ascii"), rawSha256=sha(raw), size=len(raw)))
+    emit("HELPER_SOURCE_IDENTITY", dict(baseline=BASELINE, treeOid=current, files=facts))
 
 
 def build(root: Path, output: Path) -> None:
