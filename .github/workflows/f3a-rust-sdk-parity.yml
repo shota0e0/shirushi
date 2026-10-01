@@ -21,6 +21,10 @@ on:
         description: Diagnose frozen Desktop lock checkout bytes only; no Cargo or artifacts
         type: boolean
         default: false
+      desktop_helper_msrv_diagnostic:
+        description: Windows locked Desktop 1.77/1.88 and helper 1.88 compatibility; artifact upload 0
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,7 +35,7 @@ concurrency:
 
 jobs:
   sdk_parity:
-    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only))
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only || inputs.desktop_helper_msrv_diagnostic))
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -137,7 +141,7 @@ jobs:
 
   real_helper_fixed_path_canary:
     name: ${{ inputs.release_helper_native_inventory_canary && 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' || 'real_helper_fixed_path_canary' }}
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_lock_byte_identity_only && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_helper_msrv_diagnostic && !inputs.desktop_lock_byte_identity_only && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -353,7 +357,7 @@ jobs:
 
   desktop_lock_byte_identity_only:
     name: DESKTOP_LOCK_BYTE_IDENTITY_ONLY
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.desktop_lock_byte_identity_only
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_helper_msrv_diagnostic && inputs.desktop_lock_byte_identity_only
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -497,3 +501,144 @@ jobs:
           'HELPER_CONTROL_UNCHANGED: true; INDEX_UNCHANGED: true'
           'ARTIFACT_UPLOAD_COUNT: 0'
           @('DESKTOP_LOCK_BYTE_IDENTITY_ONLY', "WORKFLOW_COMMIT: ${{ github.sha }}", "DIAGNOSTIC_SOURCE_COMMIT: $source", "CLASSIFICATION: $classification", "CHECKOUT_INDEX_OBSERVATION: $checkoutIndexResult", 'Cargo/fetch/build/tests/PE/runtime/package: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Candidate Release Helper Canary: NOT RESUMED') >> $env:GITHUB_STEP_SUMMARY
+
+  desktop_helper_msrv_diagnostic:
+    name: DESKTOP_HELPER_MSRV_DIAGNOSTIC
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.desktop_helper_msrv_diagnostic
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Reject conflicting modes
+        shell: pwsh
+        run: |
+          if ('${{ inputs.real_helper_fixed_path_canary }}' -eq 'true' -or '${{ inputs.release_helper_native_inventory_canary }}' -eq 'true' -or '${{ inputs.desktop_lock_byte_identity_only }}' -eq 'true') { throw 'CONFLICTING_MSRV_MODES' }
+
+      - name: Check out exact diagnostic HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Canonical locks, active MSRV survey and isolated compatibility attempts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $locks = @{
+            'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
+          }
+          function Read-RawBlob([string]$oid) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [System.Diagnostics.Process]::Start($start)
+            $memory = [System.IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+          }
+          function Get-Sha([byte[]]$bytes) {
+            return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+          }
+          function Assert-Locks([string]$stage, [bool]$materialize = $false) {
+            foreach ($path in $locks.Keys) {
+              $oid = (git rev-parse "HEAD:$path").Trim()
+              if ($LASTEXITCODE -ne 0 -or $oid -ne $locks[$path][0]) { throw 'LOCK_BLOB_OID_MISMATCH' }
+              $raw = Read-RawBlob $oid
+              if ((Get-Sha $raw) -ne $locks[$path][1]) { throw 'CANONICAL_LOCK_HASH_MISMATCH' }
+              $workingPath = Join-Path $PWD $path
+              if ($materialize) { [System.IO.File]::WriteAllBytes($workingPath, $raw) }
+              $working = [System.IO.File]::ReadAllBytes($workingPath)
+              if (!( [System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working)) -or (Get-Sha $working) -ne $locks[$path][1]) { throw 'WORKING_LOCK_BYTES_CHANGED' }
+              Write-Host "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$(Get-Sha $raw) raw_bytes_equal=true"
+            }
+            if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+          }
+          function Invoke-Compatibility([string]$label, [string]$toolchain, [string[]]$arguments) {
+            Assert-Locks "before-$label"
+            $env:CARGO_TARGET_DIR = Join-Path '${{ runner.temp }}' "msrv-$toolchain"
+            Write-Host "ATTEMPT: $label TOOLCHAIN=$toolchain ARGS=$($arguments -join ' ')"
+            $output = @(& cargo "+$toolchain-x86_64-pc-windows-msvc" @arguments 2>&1)
+            $code = $LASTEXITCODE
+            Assert-Locks "after-$label"
+            $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
+            $compilationSeen = $text -match '(?m)^\s*Compiling '
+            Write-Host "ATTEMPT_RESULT: $label exit=$code dependency_compilation_seen=$compilationSeen"
+            if ($code -eq 0) {
+              $output | Where-Object { $_.ToString() -match '^(running |test result:|\s*Finished )' } | ForEach-Object { Write-Host $_.ToString() }
+            } else {
+              # Bounded actual Cargo/compiler evidence; no full build log dump.
+              $output | Select-Object -Last 60 | ForEach-Object { Write-Host $_.ToString() }
+            }
+            $state = if ($code -eq 0) { 'PASS' } elseif ($text -match 'requires rustc|requires Rust|edition2024|edition 2024|feature.*edition2024|is unstable|error\[E\d+\]') { 'UNSUPPORTED' } else { 'DIAGNOSTIC_INSUFFICIENT' }
+            "COMPATIBILITY: $label $state" >> $env:GITHUB_STEP_SUMMARY
+            return [pscustomobject]@{ Label=$label; State=$state; Exit=$code }
+          }
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+          $results = @()
+          try {
+            Assert-Locks 'initial-materialization' $true
+            "TESTED_SOURCE_COMMIT: ${{ github.sha }}"
+            foreach ($version in @('1.97.1', '1.77.0', '1.88.0')) {
+              $toolchain = "$version-x86_64-pc-windows-msvc"
+              rustup toolchain install $toolchain --profile minimal --target x86_64-pc-windows-msvc
+              if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_TOOLCHAIN_INSTALL_FAILED' }
+              $rust = rustc "+$toolchain" --version
+              if ($LASTEXITCODE -ne 0 -or !$rust.StartsWith("rustc $version ")) { throw 'RUST_IDENTITY_MISMATCH' }
+              $cargo = cargo "+$toolchain" --version
+              if ($LASTEXITCODE -ne 0 -or !$cargo.StartsWith("cargo $version ")) { throw 'CARGO_IDENTITY_MISMATCH' }
+              "TOOLCHAIN_IDENTITY: $rust; $cargo; target=x86_64-pc-windows-msvc"
+            }
+            foreach ($manifest in @('desktop/Cargo.toml', 'tools/f3a-rust-sdk-parity/Cargo.toml')) {
+              Assert-Locks 'before-frozen-fetch'
+              cargo +1.97.1-x86_64-pc-windows-msvc fetch --locked --manifest-path $manifest
+              if ($LASTEXITCODE -ne 0) { throw 'FROZEN_FETCH_FAILED' }
+              Assert-Locks 'after-frozen-fetch'
+              $raw = cargo +1.97.1-x86_64-pc-windows-msvc metadata --locked --offline --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path $manifest
+              if ($LASTEXITCODE -ne 0) { throw 'MSRV_METADATA_FAILED' }
+              $metadata = $raw | ConvertFrom-Json
+              $tree = @(cargo +1.97.1-x86_64-pc-windows-msvc tree --locked --offline --target x86_64-pc-windows-msvc --manifest-path $manifest --prefix none --format '{p}' --no-dedupe | Sort-Object -Unique)
+              if ($LASTEXITCODE -ne 0) { throw 'ACTIVE_WINDOWS_TREE_FAILED' }
+              $active = @($metadata.packages | Where-Object { $tree -Match ('^'+[regex]::Escape($_.name+' v'+$_.version)+'(?: |$)') } | Sort-Object name,version)
+              $declared = @($active | Where-Object rust_version | Sort-Object { [version]$_.rust_version } -Descending)
+              foreach ($package in $active) {
+                'ACTIVE_MSRV: ' + ([ordered]@{ graph=$manifest; package=$package.name; version=$package.version; rust_version=$package.rust_version } | ConvertTo-Json -Compress)
+              }
+              "SURVEY: graph=$manifest packages=$($active.Count) no_rust_version=$(@($active | Where-Object { !$_.rust_version }).Count) highest_declared=$($declared[0].rust_version); metadata_only_not_compile_proof"
+              if ($manifest.StartsWith('tools/')) {
+                $sdk = @($active | Where-Object name -EQ 'c2pa')
+                $features = @(($metadata.resolve.nodes | Where-Object id -EQ $sdk[0].id).features)
+                $scripts = @($active | Where-Object { @($_.targets | Where-Object kind -Contains 'custom-build').Count })
+                if ($sdk.Count -ne 1 -or $sdk[0].version -ne '0.85.0' -or $features.Count -ne 1 -or $features[0] -ne 'rust_native_crypto' -or $active.Count -ne 240 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'FROZEN_HELPER_FOOTPRINT_MISMATCH' }
+              }
+              Assert-Locks 'after-msrv-survey'
+            }
+            $common = @('--locked', '--offline', '--target', 'x86_64-pc-windows-msvc')
+            $desktop = @('--manifest-path', 'desktop/Cargo.toml')
+            $helper = @('--manifest-path', 'tools/f3a-rust-sdk-parity/Cargo.toml')
+            $d177 = Invoke-Compatibility 'Desktop-1.77-lib' '1.77.0' (@('test') + $common + $desktop + @('--lib'))
+            $results += $d177
+            $h188 = Invoke-Compatibility 'Helper-1.88-tests' '1.88.0' (@('test') + $common + $helper)
+            $results += $h188
+            if ($h188.State -eq 'PASS') {
+              $results += Invoke-Compatibility 'Helper-1.88-release-helper' '1.88.0' (@('build', '--release') + $common + $helper + @('--bin', 'shirushi-inspection-helper'))
+            }
+            $d188 = Invoke-Compatibility 'Desktop-1.88-lib' '1.88.0' (@('test') + $common + $desktop + @('--lib'))
+            $results += $d188
+            if ($d188.State -eq 'PASS') {
+              $results += Invoke-Compatibility 'Desktop-1.88-supervisor-default' '1.88.0' (@('test') + $common + $desktop + @('--test', 'inspection_supervisor'))
+              $results += Invoke-Compatibility 'Desktop-1.88-supervisor-manual' '1.88.0' (@('test') + $common + $desktop + @('--features', 'manual-canary', '--test', 'inspection_supervisor'))
+            }
+            foreach ($result in $results) { 'MSRV_RESULT: ' + ($result | ConvertTo-Json -Compress) }
+          } finally {
+            Assert-Locks 'final'
+            @('DESKTOP_HELPER_MSRV_DIAGNOSTIC', 'Real helper integration: NOT RUN (optional trusted build-input harness not configured in this diagnostic)', 'Modern 1.97.1: frozen fetch/metadata only; accepted suites remain control, not MSRV proof', 'Parked limited-canary binaries: NOT RUN', 'Package/installer generation: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Declarations unchanged: Desktop1.77 / Helper1.88', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            'ARTIFACT_UPLOAD_COUNT: 0; INDEX_UNCHANGED: true'
+          }
