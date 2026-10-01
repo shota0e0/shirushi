@@ -25,6 +25,10 @@ on:
         description: Windows locked Desktop 1.77/1.88 and helper 1.88 compatibility; artifact upload 0
         type: boolean
         default: false
+      desktop_release_native_inventory_canary:
+        description: CI-only Desktop default release static PE/native inventory; no launch or artifacts
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,7 +39,7 @@ concurrency:
 
 jobs:
   sdk_parity:
-    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only || inputs.desktop_helper_msrv_diagnostic))
+    if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only || inputs.desktop_helper_msrv_diagnostic || inputs.desktop_release_native_inventory_canary))
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -141,7 +145,7 @@ jobs:
 
   real_helper_fixed_path_canary:
     name: ${{ inputs.release_helper_native_inventory_canary && 'RELEASE_HELPER_NATIVE_INVENTORY_CANARY' || 'real_helper_fixed_path_canary' }}
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_helper_msrv_diagnostic && !inputs.desktop_lock_byte_identity_only && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_release_native_inventory_canary && !inputs.desktop_helper_msrv_diagnostic && !inputs.desktop_lock_byte_identity_only && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary)
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -357,7 +361,7 @@ jobs:
 
   desktop_lock_byte_identity_only:
     name: DESKTOP_LOCK_BYTE_IDENTITY_ONLY
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_helper_msrv_diagnostic && inputs.desktop_lock_byte_identity_only
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_release_native_inventory_canary && !inputs.desktop_helper_msrv_diagnostic && inputs.desktop_lock_byte_identity_only
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -504,7 +508,7 @@ jobs:
 
   desktop_helper_msrv_diagnostic:
     name: DESKTOP_HELPER_MSRV_DIAGNOSTIC
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.desktop_helper_msrv_diagnostic
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !inputs.desktop_release_native_inventory_canary && inputs.desktop_helper_msrv_diagnostic
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -672,5 +676,197 @@ jobs:
           } finally {
             Assert-Locks 'final'
             @('DESKTOP_HELPER_MSRV_DIAGNOSTIC', 'Real helper integration: NOT RUN (optional trusted build-input harness not configured in this diagnostic)', 'Helper1.88: accepted CI36878172530; 88 tests and release build PASS; NOT RERUN', 'Modern 1.97.1: frozen fetch/metadata only; accepted suites remain control, not MSRV proof', 'Parked limited-canary binaries: NOT RUN', 'Package/installer generation: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Current declarations: Desktop1.88 / Helper1.88; independent Cargo graphs', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            'ARTIFACT_UPLOAD_COUNT: 0; INDEX_UNCHANGED: true'
+          }
+
+  desktop_release_native_inventory_canary:
+    name: DESKTOP_RELEASE_NATIVE_INVENTORY_CANARY
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && inputs.desktop_release_native_inventory_canary
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0-x86_64-pc-windows-msvc
+    steps:
+      - name: Reject conflicting modes
+        shell: pwsh
+        run: |
+          if ('${{ inputs.real_helper_fixed_path_canary }}' -eq 'true' -or '${{ inputs.release_helper_native_inventory_canary }}' -eq 'true' -or '${{ inputs.desktop_lock_byte_identity_only }}' -eq 'true' -or '${{ inputs.desktop_helper_msrv_diagnostic }}' -eq 'true') { throw 'CONFLICTING_DESKTOP_INVENTORY_MODES' }
+
+      - name: Check out exact Desktop inventory HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up standard-library-only CI evidence interpreter
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+          architecture: x64
+
+      - name: Canonical locks, default release build and static Desktop inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:CARGO_TARGET_DIR = Join-Path '${{ runner.temp }}' 'desktop-release-native-target'
+          $locks = @{
+            'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
+          }
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+          function Read-RawBlob([string]$oid) {
+            $start = [Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [Diagnostics.Process]::Start($start)
+            $memory = [IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+          }
+          function Assert-DesktopLock([string]$stage, [bool]$materialize = $false) {
+            foreach ($path in @('desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock')) {
+            $expectedOid = $locks[$path][0]; $expectedSha = $locks[$path][1]
+            $oid = (git rev-parse "HEAD:$path").Trim()
+            if ($LASTEXITCODE -ne 0 -or $oid -ne $expectedOid) { throw 'LOCK_BLOB_OID_MISMATCH' }
+            $raw = Read-RawBlob $oid
+            $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant()
+            if ($sha -ne $expectedSha) { throw 'CANONICAL_LOCK_HASH_MISMATCH' }
+            if ($materialize) { [IO.File]::WriteAllBytes((Join-Path $PWD $path), $raw) }
+            $working = [IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($working)).ToLowerInvariant()
+            if (-not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working) -or $workingSha -ne $expectedSha) { throw 'WORKING_LOCK_BYTES_CHANGED' }
+            if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+            "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$sha raw_bytes_equal=true index_unchanged=true"
+            }
+          }
+          try {
+            Assert-DesktopLock 'initial-materialization' $true
+            rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+            if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_TOOLCHAIN_INSTALL_FAILED' }
+            Assert-DesktopLock 'before-frozen-fetch'
+            cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml
+            if ($LASTEXITCODE -ne 0) { throw 'FROZEN_DESKTOP_FETCH_FAILED' }
+            Assert-DesktopLock 'after-frozen-fetch'
+            # Reuse only the bounded PE reader, never its helper-specific build/preflight.
+            @'
+          import hashlib, json, os, re, subprocess, sys, tomllib
+          from pathlib import Path
+          from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def main():
+              root = Path.cwd()
+              manifest = tomllib.loads((root / 'desktop/Cargo.toml').read_text(encoding='utf-8'))
+              config = json.loads((root / 'desktop/tauri.conf.json').read_text(encoding='utf-8'))
+              if manifest['package']['rust-version'] != '1.88' or manifest['package']['edition'] != '2021' or manifest['features']['default'] != [] or config['bundle']['active'] is not False:
+                  raise ValueError('DESKTOP_BUILD_CONTRACT_MISMATCH')
+              blocked = {'ICU4X_DATA_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','RUSTC','RUSTDOC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTC_BOOTSTRAP','RUSTC_LOG','RUSTC_STAGE','CL','_CL_','LINK','_LINK_','CARGO_BUILD_RUSTFLAGS','CARGO_BUILD_TARGET','CARGO_INCREMENTAL','CARGO_BUILD_INCREMENTAL','CARGO_BUILD_RUSTC','CARGO_BUILD_RUSTC_WRAPPER','CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER'}
+              overrides = sorted(k for k in os.environ if k in blocked or k.startswith('CARGO_PROFILE_') or (k.startswith('CARGO_TARGET_') and k.endswith(('_LINKER','_RUSTFLAGS'))))
+              homes = [Path(os.environ.get('CARGO_HOME', str(Path.home()/'.cargo'))), root/'desktop/.cargo'] + [p/'.cargo' for p in [root,*root.parents]]
+              config_present = any((p/n).is_file() for p in homes for n in ('config','config.toml'))
+              emit('DESKTOP_BUILD_ENVIRONMENT', dict(unexpectedOverrideNames=overrides, cargoConfigurationPresent=config_present, ICU4X_DATA_DIR='UNSET' if 'ICU4X_DATA_DIR' not in os.environ else 'PRESENT', addedCodegenFlags=[], diagnosticOnlyFlag='RUSTC_LOG=rustc_codegen_ssa::back::link=info'))
+              if overrides or config_present:
+                  raise ValueError('UNCONTROLLED_BUILD_ENVIRONMENT')
+              def checked(args):
+                  p = subprocess.run(args, capture_output=True, timeout=30)
+                  if p.returncode: raise ValueError('TOOL_IDENTITY_FAILED')
+                  return p.stdout.decode('utf-8','replace').strip()
+              rust, cargo = checked(['rustc','-vV']), checked(['cargo','-vV'])
+              if not rust.startswith('rustc 1.88.0 ') or not cargo.startswith('cargo 1.88.0 '):
+                  raise ValueError('TOOLCHAIN_MISMATCH')
+              args = ['cargo','+1.88.0','build','--release','--locked','--offline','--target','x86_64-pc-windows-msvc','--manifest-path','desktop/Cargo.toml','--bin','shirushi-desktop']
+              env = os.environ.copy(); env['RUSTC_LOG'] = 'rustc_codegen_ssa::back::link=info'
+              p = subprocess.run(args, env=env, capture_output=True, timeout=2400)
+              log = (p.stdout+p.stderr).decode('utf-8','replace')
+              if p.returncode:
+                  # Actual bounded error evidence, no raw linker commands or private paths.
+                  markers = sorted({str(root),str(Path.home()),str(Path(os.environ['RUNNER_TEMP']))}, key=len, reverse=True)
+                  errors = [s for s in log.splitlines() if s.startswith(('error','Caused by:','  -->','  ='))][-30:]
+                  for i, line in enumerate(errors):
+                      for marker in markers:
+                          line = line.replace(marker,'<CI_PATH>').replace(marker.replace('\\','/'),'<CI_PATH>')
+                      errors[i] = line[:500]
+                  emit('DESKTOP_BUILD_FAILURE', dict(exitCode=p.returncode, boundedErrors=errors, rawLogPublished=False))
+                  raise ValueError('DEFAULT_DESKTOP_RELEASE_BUILD_FAILED')
+              lines = [s for s in log.splitlines() if 'back::link' in s and 'shirushi_desktop' in s and 'link.exe' in s and '.exe' in s]
+              candidates = {m.group(1).replace('\\\\','\\') for s in lines for m in re.finditer(r'"([^"\r\n]*[\\/]link\.exe)"',s,re.I)}
+              if len(candidates) != 1: raise ValueError('ACTUAL_LINKER_IDENTITY_UNRESOLVED')
+              linker = Path(candidates.pop())
+              version = checked([str(linker),'/?'])
+              version_line = next((s.strip() for s in version.splitlines() if 'Linker Version' in s),None)
+              if not version_line: raise ValueError('LINKER_VERSION_UNRESOLVED')
+              msvc = re.search(r'[\\/]MSVC[\\/]([^\\/]+)',str(linker),re.I)
+              sdk = sorted(set(re.findall(r'Windows Kits(?:\\\\|[\\/])10(?:\\\\|[\\/])lib(?:\\\\|[\\/])([0-9.]+)','\n'.join(lines),re.I)))
+              emit('DESKTOP_RELEASE_BUILD', dict(sourceCommit=checked(['git','rev-parse','HEAD']),rustc=rust.splitlines(),cargo=cargo.splitlines(),host=next((s.split(': ',1)[1] for s in rust.splitlines() if s.startswith('host: ')),'UNPROVEN'),target='x86_64-pc-windows-msvc',profile='Cargo default release',command=args,linker=dict(basename=linker.name,sha256=sha(linker.read_bytes()),version=version_line,msvcToolset=msvc.group(1) if msvc else 'UNPROVEN',identitySource='observed rustc Desktop link invocation'),windowsSdkVersionsFromLinkInvocation=sdk or ['UNPROVEN']))
+              binary = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/release/shirushi-desktop.exe'
+              raw = binary.read_bytes(); pe = PE(raw)
+              if pe.machine != 0x8664 or pe.subsystem != 2: raise ValueError('DESKTOP_PE_TARGET_MISMATCH')
+              system = Path(os.environ['SystemRoot'])/'System32'
+              names = {p.name.lower() for p in system.glob('*.dll')}
+              evidence = pe.evidence(names,root)
+              def category(name):
+                  name = name.lower()
+                  if VC_RUNTIME.fullmatch(name): return 'VC_RUNTIME'
+                  if name == 'ucrtbase.dll' or name.startswith('api-ms-win-crt-'): return 'UCRT'
+                  if name == 'webview2loader.dll' or name.startswith('embeddedbrowserwebview'): return 'WEBVIEW2_RUNTIME_OR_LOADER'
+                  if name.startswith(('api-ms-win-','ext-ms-win-')): return 'WINDOWS_API_SET'
+                  if name in names: return 'WINDOWS_SYSTEM'
+                  return 'UNKNOWN'
+              for row in evidence['imports']+evidence['delayImports']:
+                  row['classification'] = category(row['dll'])
+              # Reuse helper PE parsing; publish only this product's safe PDB basename.
+              debug_rva, debug_size = pe.directory(6)
+              for i, row in enumerate(evidence['debugEntries']):
+                  if row.get('pdbReferencePresent'):
+                      pos = pe.offset(debug_rva+i*28,28)
+                      _,_,_,_,kind,length,_,pointer = pe.unpack('<IIHHIIII',pos)
+                      data = pe.read(pointer,length)
+                      offset = 24 if data[:4]==b'RSDS' else 16
+                      from pathlib import PureWindowsPath
+                      base = PureWindowsPath(data[offset:].split(b'\0',1)[0].decode('utf-8','replace')).name
+                      row['pdbBasename'] = base if re.fullmatch(r'shirushi[_-]desktop\.pdb',base) else 'REDACTED'
+              evidence['resources']['totalLeafBytes'] = sum(r['size'] for r in evidence['resources']['leaves'])
+              emit('DESKTOP_RELEASE_BINARY',dict(filename=binary.name,size=len(raw),sha256=sha(raw),pe=evidence,classificationScope='host System32 inventory/API-set contracts; not universal OS availability; unknown remains unknown'))
+              # Locked dependency source evidence, not a claim of complete dynamic closure.
+              package = next(p for p in tomllib.loads((root/'desktop/Cargo.lock').read_text())['package'] if p['name']=='webview2-com-sys')
+              cache = Path(os.environ.get('CARGO_HOME',str(Path.home()/'.cargo')))/'registry/src'
+              sources = list(cache.glob('*/webview2-com-sys-'+package['version']+'/src/lib.rs'))
+              if len(sources)!=1: raise ValueError('WEBVIEW2_SOURCE_EVIDENCE_UNRESOLVED')
+              source = sources[0].read_text()
+              loader = 'link(name = "WebView2LoaderStatic", kind = "static")' in source
+              wry_package = next(p for p in tomllib.loads((root/'desktop/Cargo.lock').read_text())['package'] if p['name']=='wry')
+              wry_sources = list(cache.glob('*/wry-'+wry_package['version']+'/src/webview2/mod.rs'))
+              if len(wry_sources)!=1: raise ValueError('WRY_SOURCE_EVIDENCE_UNRESOLVED')
+              wry_source = wry_sources[0].read_text()
+              creates_environment = 'CreateCoreWebView2EnvironmentWithOptions(' in wry_source
+              app_source = (root/'desktop/src/lib.rs').read_text()
+              webview = 'WebviewWindowBuilder::new' in app_source
+              static_webview = any(category(r['dll'])=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['imports'])
+              delay_webview = any(category(r['dll'])=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['delayImports'])
+              webview_status = 'WEBVIEW2_DIRECT_IMPORT' if static_webview else 'WEBVIEW2_DYNAMIC_RUNTIME_PREREQUISITE' if loader and webview and creates_environment else 'WEBVIEW2_STATUS_UNPROVEN'
+              vc = sorted({r['dll'] for r in evidence['imports']+evidence['delayImports'] if r['classification']=='VC_RUNTIME'})
+              comparison = 'SAME_VC_RUNTIME_FAMILY' if vc and all(r.startswith('vcruntime140') for r in vc) else 'DIFFERENT_RUNTIME_REQUIREMENTS' if vc else 'INSUFFICIENT_EVIDENCE'
+              emit('DESKTOP_DYNAMIC_LOAD_SOURCE',dict(webview2SysVersion=package['version'],webview2SourceSha256=sha(sources[0].read_bytes()),wryVersion=wry_package['version'],wrySourceSha256=sha(wry_sources[0].read_bytes()),wryCreatesWebview2Environment=creates_environment,msvcStaticLoaderDeclaration=loader,applicationCreatesWebview=webview,loaderIsNotRuntime=True,directWebviewImport=static_webview,delayWebviewImport=delay_webview,webview2Status=webview_status,completeRuntimeClosure='UNPROVEN',runtimeLaunch='NOT_RUN'))
+              emit('DESKTOP_HELPER_COMPARISON',dict(helperAcceptedEvidence='CI36854166551; vcruntime140.dll and UCRT; bounded sample no other non-system modules',desktopVcImports=vc,vcFamily=comparison,additionalRuntimeRequirements=['WebView2 Runtime'],sharedDeliverySolved=False,completeRuntimeClosure='UNPROVEN'))
+              if not loader or not webview or not creates_environment: raise ValueError('WEBVIEW2_SOURCE_CONTRACT_MISMATCH')
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as summary:
+                  summary.write('Desktop default release build/PE: PASS\nDesktop size: '+str(len(raw))+'\nDesktop SHA-256: '+sha(raw)+'\nWebView2: '+webview_status+'\nVC runtime imports: '+', '.join(vc)+'\nHelper comparison: '+comparison+'; additional WebView2 prerequisite\n')
+          try: main()
+          except Exception as error:
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch('[A-Z0-9_]+',str(error)) else type(error).__name__
+              emit('DESKTOP_EVIDENCE_FAILURE',dict(code=code)); sys.exit(1)
+          '@ | python -B -
+            if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_RELEASE_INVENTORY_FAILED' }
+            Assert-DesktopLock 'after-release-build-PE'
+            'RUNTIME_MODULE_OBSERVATION: NOT RUN; static inventory only; release Desktop intentionally not launched'
+          } finally {
+            Assert-DesktopLock 'final'
+            @('DESKTOP_RELEASE_NATIVE_INVENTORY_CANARY', 'Exact target: shirushi-desktop; Rust1.88.0; x86_64-pc-windows-msvc; Cargo default release; no manual-canary feature', 'Existing Desktop93/93 Rust1.88 tests: accepted CI36934766526 baseline control; NOT RERUN (no source change)', 'Desktop/runtime execution: NOT RUN; static inventory only; development BridgeHost/debug-only boundaries unchanged', 'Helper integration/build: NOT RUN', 'Package/bundle/installer generation: NOT RUN; bundle.active remains false', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Native inventory only; complete runtime closure and zero-setup NOT PROVEN', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'ARTIFACT_UPLOAD_COUNT: 0; INDEX_UNCHANGED: true'
           }
