@@ -133,7 +133,6 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: ${{ runner.temp }}/real-helper-canary-target
     steps:
       - name: Check out exact Canary source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,6 +143,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          "CARGO_TARGET_DIR=$(Join-Path '${{ runner.temp }}' 'real-helper-canary-target')" >> $env:GITHUB_ENV
           if ((git rev-parse HEAD) -ne '${{ github.sha }}') { throw 'SOURCE_IDENTITY_MISMATCH' }
           git config --local core.autocrlf false
           if ($LASTEXITCODE -ne 0) { throw 'SCOPED_GIT_CONFIG_FAILED' }
