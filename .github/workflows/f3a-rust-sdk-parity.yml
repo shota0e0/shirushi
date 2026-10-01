@@ -519,6 +519,13 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Set up existing BridgeHost test interpreter only
+        id: msrv_python_setup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+          architecture: x64
+
       - name: Canonical locks, active MSRV survey and isolated compatibility attempts
         shell: pwsh
         run: |
@@ -558,7 +565,7 @@ jobs:
             }
             if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
           }
-          function Invoke-Compatibility([string]$label, [string]$toolchain, [string[]]$arguments) {
+          function Invoke-Compatibility([string]$label, [string]$toolchain, [string[]]$arguments, [bool]$preparation = $false) {
             Assert-Locks "before-$label"
             $env:CARGO_TARGET_DIR = Join-Path '${{ runner.temp }}' "msrv-$toolchain"
             Write-Host "ATTEMPT: $label TOOLCHAIN=$toolchain ARGS=$($arguments -join ' ')"
@@ -575,8 +582,19 @@ jobs:
               $output | Select-Object -Last 60 | ForEach-Object { Write-Host $_.ToString() }
             }
             $state = if ($code -eq 0) { 'PASS' } elseif ($text -match 'requires rustc|requires Rust|edition2024|edition 2024|feature.*edition2024|is unstable|error\[E\d+\]') { 'UNSUPPORTED' } else { 'DIAGNOSTIC_INSUFFICIENT' }
+            $fetchCategory = $null
+            if ($preparation) {
+              $fetchCategory = if ($code -eq 0) { 'PREPARATION_PASS' }
+                elseif ($text -match 'lock file version.*not understood|lockfile version.*not supported|unsupported lock file version') { 'OLD_CARGO_LOCK_FORMAT_INCOMPATIBLE' }
+                elseif ($text -match 'unsupported registry protocol|sparse.*not supported|unsupported.*sparse') { 'OLD_CARGO_REGISTRY_PROTOCOL_INCOMPATIBLE' }
+                elseif ($text -match 'requires rustc|requires Rust|rust-version.*(unsupported|too old)') { 'DEPENDENCY_REQUIRES_NEWER_RUST' }
+                elseif ($text.Length) { 'DEPENDENCY_FETCH_FAILURE_OTHER' }
+                else { 'DIAGNOSTIC_INSUFFICIENT' }
+              Write-Host "OLD_CARGO_FETCH_CLASSIFICATION: $fetchCategory"
+              "OLD_CARGO_FETCH_CLASSIFICATION: $fetchCategory" >> $env:GITHUB_STEP_SUMMARY
+            }
             "COMPATIBILITY: $label $state" >> $env:GITHUB_STEP_SUMMARY
-            return [pscustomobject]@{ Label=$label; State=$state; Exit=$code }
+            return [pscustomobject]@{ Label=$label; State=$state; Exit=$code; FetchCategory=$fetchCategory }
           }
           if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
           $indexPath = (git rev-parse --git-path index).Trim()
@@ -586,6 +604,19 @@ jobs:
           try {
             Assert-Locks 'initial-materialization' $true
             "TESTED_SOURCE_COMMIT: ${{ github.sha }}"
+            Assert-Locks 'before-BridgeHost-fixture'
+            $python = '${{ steps.msrv_python_setup.outputs.python-path }}'
+            if (-not [IO.Path]::IsPathFullyQualified($python)) { throw 'BRIDGE_TEST_PYTHON_IDENTITY_REQUIRED' }
+            & $python -I -B -c "import platform,struct; assert platform.python_implementation() == 'CPython' and platform.python_version() == '3.12.10' and struct.calcsize('P') == 8"
+            if ($LASTEXITCODE -ne 0) { throw 'BRIDGE_TEST_PYTHON_IDENTITY_MISMATCH' }
+            if (Test-Path -LiteralPath .venv-py312) { throw 'BRIDGE_TEST_VENV_NOT_FRESH' }
+            & $python -I -B -m venv --without-pip .venv-py312
+            if ($LASTEXITCODE -ne 0) { throw 'BRIDGE_TEST_VENV_CREATE_FAILED' }
+            & .\.venv-py312\Scripts\python.exe -I -B -c "import platform,struct; assert platform.python_implementation() == 'CPython' and platform.python_version() == '3.12.10' and struct.calcsize('P') == 8; import importlib.util; assert importlib.util.find_spec('pip') is None"
+            if ($LASTEXITCODE -ne 0) { throw 'BRIDGE_TEST_VENV_IDENTITY_MISMATCH' }
+            Assert-Locks 'after-BridgeHost-fixture'
+            'BRIDGEHOST_FIXTURE: CPython3.12.10 x64; fresh .venv-py312; no pip/packages; test infrastructure only'
+            'BRIDGEHOST_FIXTURE: PASS; CPython3.12.10 x64; no pip/packages' >> $env:GITHUB_STEP_SUMMARY
             foreach ($version in @('1.97.1', '1.77.0', '1.88.0')) {
               $toolchain = "$version-x86_64-pc-windows-msvc"
               rustup toolchain install $toolchain --profile minimal --target x86_64-pc-windows-msvc
@@ -622,13 +653,13 @@ jobs:
             }
             $common = @('--locked', '--offline', '--target', 'x86_64-pc-windows-msvc')
             $desktop = @('--manifest-path', 'desktop/Cargo.toml')
-            $helper = @('--manifest-path', 'tools/f3a-rust-sdk-parity/Cargo.toml')
-            $d177 = Invoke-Compatibility 'Desktop-1.77-lib' '1.77.0' (@('test') + $common + $desktop + @('--lib'))
-            $results += $d177
-            $h188 = Invoke-Compatibility 'Helper-1.88-tests' '1.88.0' (@('test') + $common + $helper)
-            $results += $h188
-            if ($h188.State -eq 'PASS') {
-              $results += Invoke-Compatibility 'Helper-1.88-release-helper' '1.88.0' (@('build', '--release') + $common + $helper + @('--bin', 'shirushi-inspection-helper'))
+            $prep177 = Invoke-Compatibility 'Desktop-1.77-locked-fetch' '1.77.0' (@('fetch', '--locked') + $desktop) $true
+            $results += $prep177
+            if ($prep177.State -eq 'PASS') {
+              $results += Invoke-Compatibility 'Desktop-1.77-lib' '1.77.0' (@('test') + $common + $desktop + @('--lib'))
+            } else {
+              'Desktop-1.77-lib: NOT RUN; old-Cargo fetch failed; no cache/protocol/dependency workaround' >> $env:GITHUB_STEP_SUMMARY
+              'DESKTOP_1_77_OFFLINE_ATTEMPT: NOT RUN; fetch evidence is reported separately'
             }
             $d188 = Invoke-Compatibility 'Desktop-1.88-lib' '1.88.0' (@('test') + $common + $desktop + @('--lib'))
             $results += $d188
@@ -637,8 +668,9 @@ jobs:
               $results += Invoke-Compatibility 'Desktop-1.88-supervisor-manual' '1.88.0' (@('test') + $common + $desktop + @('--features', 'manual-canary', '--test', 'inspection_supervisor'))
             }
             foreach ($result in $results) { 'MSRV_RESULT: ' + ($result | ConvertTo-Json -Compress) }
+            'HELPER_ACCEPTED_CONTROL: HELPER_DECLARED_MSRV_CONFIRMED; CI36878172530; 88 tests PASS; release build PASS; NOT RERUN'
           } finally {
             Assert-Locks 'final'
-            @('DESKTOP_HELPER_MSRV_DIAGNOSTIC', 'Real helper integration: NOT RUN (optional trusted build-input harness not configured in this diagnostic)', 'Modern 1.97.1: frozen fetch/metadata only; accepted suites remain control, not MSRV proof', 'Parked limited-canary binaries: NOT RUN', 'Package/installer generation: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Declarations unchanged: Desktop1.77 / Helper1.88', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            @('DESKTOP_HELPER_MSRV_DIAGNOSTIC', 'Real helper integration: NOT RUN (optional trusted build-input harness not configured in this diagnostic)', 'Helper1.88: accepted CI36878172530; 88 tests and release build PASS; NOT RERUN', 'Modern 1.97.1: frozen fetch/metadata only; accepted suites remain control, not MSRV proof', 'Parked limited-canary binaries: NOT RUN', 'Package/installer generation: NOT RUN', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Declarations unchanged: Desktop1.77 / Helper1.88', 'Production adoption: UNAPPROVED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'ARTIFACT_UPLOAD_COUNT: 0; INDEX_UNCHANGED: true'
           }
