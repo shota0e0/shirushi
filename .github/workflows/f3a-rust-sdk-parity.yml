@@ -704,20 +704,30 @@ jobs:
           python-version: 3.12.10
           architecture: x64
 
-      - name: Canonical locks, default release build and static Desktop inventory
+      - name: A - Preflight and canonical locks
+        id: desktop_preflight
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
+          $stateDir = Join-Path '${{ runner.temp }}' 'desktop-inventory-${{ github.run_id }}-${{ github.run_attempt }}'
+          if (Test-Path -LiteralPath $stateDir) { throw 'INVENTORY_STATE_ALREADY_EXISTS' }
+          [void](New-Item -ItemType Directory -Path $stateDir)
+          $env:DESKTOP_INVENTORY_STATE_DIR = $stateDir
           $env:CARGO_TARGET_DIR = Join-Path '${{ runner.temp }}' 'desktop-release-native-target'
+          @("DESKTOP_INVENTORY_STATE_DIR=$stateDir", "CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR") >> $env:GITHUB_ENV
           $locks = @{
             'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
             'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
           }
           if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          'SOURCE_HEAD_MATCH: true'
           $indexPath = (git rev-parse --git-path index).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
           $indexBefore = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+          "index_sha=$indexBefore" >> $env:GITHUB_OUTPUT
+          $state = @{schemaVersion=1; sourceHead='${{ github.sha }}'; runId=$env:GITHUB_RUN_ID; runAttempt=$env:GITHUB_RUN_ATTEMPT; data=@{indexSha=$indexBefore}}
+          [IO.File]::WriteAllText((Join-Path $stateDir 'preflight.json'), ($state | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
           function Read-RawBlob([string]$oid) {
             $start = [Diagnostics.ProcessStartInfo]::new('git')
             $start.UseShellExecute = $false
@@ -747,19 +757,34 @@ jobs:
             "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$sha raw_bytes_equal=true index_unchanged=true"
             }
           }
-          try {
-            Assert-DesktopLock 'initial-materialization' $true
-            rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
-            if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_TOOLCHAIN_INSTALL_FAILED' }
-            Assert-DesktopLock 'before-frozen-fetch'
-            cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml
-            if ($LASTEXITCODE -ne 0) { throw 'FROZEN_DESKTOP_FETCH_FAILED' }
-            Assert-DesktopLock 'after-frozen-fetch'
-            # Reuse only the bounded PE reader, never its helper-specific build/preflight.
-            @'
+          Assert-DesktopLock 'initial-materialization' $true
+
+      - name: B - Pinned toolchain and source identity
+        id: desktop_toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'OFFICIAL_TOOLCHAIN_INSTALL_FAILED' }
+          $ErrorActionPreference = 'Stop'
+          @'
           import hashlib, json, os, re, shutil, subprocess, sys, tomllib
           from pathlib import Path
           from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def read_state(name):
+              raw = (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).read_bytes()
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              value = json.loads(raw)
+              if set(value)!={'schemaVersion','sourceHead','runId','runAttempt','data'} or value['schemaVersion']!=1 or value['sourceHead']!=os.environ['GITHUB_SHA'] or value['runId']!=os.environ['GITHUB_RUN_ID'] or value['runAttempt']!=os.environ['GITHUB_RUN_ATTEMPT']:
+                  raise ValueError('INVENTORY_STATE_BINDING_MISMATCH')
+              return value['data']
+          def write_state(name,data):
+              value = dict(schemaVersion=1,sourceHead=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],data=data)
+              raw = json.dumps(value,sort_keys=True,separators=(',',':')).encode('utf-8')
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              with (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).open('xb') as out:
+                  out.write(raw)
           def main():
               root = Path.cwd()
               manifest = tomllib.loads((root / 'desktop/Cargo.toml').read_text(encoding='utf-8'))
@@ -794,9 +819,99 @@ jobs:
               rust, cargo = checked('rustc-identity',['rustc','-vV']), checked('cargo-identity',['cargo','-vV'])
               if not rust.startswith('rustc 1.88.0 ') or not cargo.startswith('cargo 1.88.0 '):
                   raise ValueError('TOOLCHAIN_MISMATCH')
-              index_path = Path(checked('git-index-path',['git','rev-parse','--git-path','index']))
-              index_before = sha(index_path.read_bytes())
+              rust_fields = [s for s in rust.splitlines() if re.fullmatch(r'(?:rustc |binary: |commit-hash: |commit-date: |host: |release: |LLVM version: )[A-Za-z0-9 .()_-]+',s)]
+              cargo_fields = [s for s in cargo.splitlines() if re.fullmatch(r'(?:cargo |release: |commit-hash: |commit-date: |host: |libgit2: |libcurl: |ssl: |os: )[A-Za-z0-9 .(),:_+-]+',s)]
+              write_state('toolchain',dict(sourceCommit=source_head,rustc=rust_fields,cargo=cargo_fields,host=next((s.split(': ',1)[1] for s in rust_fields if s.startswith('host: ')),'UNPROVEN')))
+          try: main()
+          except Exception as error:
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch("[A-Z0-9_]+",str(error)) else type(error).__name__
+              emit("DESKTOP_EVIDENCE_FAILURE",dict(code=code)); sys.exit(1)
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_INVENTORY_STEP_FAILED' }
+
+      - name: C - Frozen dependency fetch
+        id: desktop_fetch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $locks = @{
+            'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
+          }
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          function Read-InventoryState([string]$name) {
+            $file = Join-Path $env:DESKTOP_INVENTORY_STATE_DIR ($name + '.json')
+            if (-not [IO.File]::Exists($file) -or (Get-Item -LiteralPath $file).Length -gt 1048576) { throw 'INVENTORY_STATE_UNAVAILABLE' }
+            $value = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+            if ($value.schemaVersion -ne 1 -or $value.sourceHead -ne '${{ github.sha }}' -or $value.runId -ne $env:GITHUB_RUN_ID -or $value.runAttempt -ne $env:GITHUB_RUN_ATTEMPT) { throw 'INVENTORY_STATE_BINDING_MISMATCH' }
+            return $value.data
+          }
+          $indexBefore = '${{ steps.desktop_preflight.outputs.index_sha }}'
+          if ($indexBefore -notmatch '^[0-9A-F]{64}$' -or (Read-InventoryState 'preflight').indexSha -ne $indexBefore) { throw 'INDEX_BASELINE_UNAVAILABLE_OR_CHANGED' }
+          function Read-RawBlob([string]$oid) {
+            $start = [Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [Diagnostics.Process]::Start($start)
+            $memory = [IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+          }
+          function Assert-DesktopLock([string]$stage, [bool]$materialize = $false) {
+            foreach ($path in @('desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock')) {
+            $expectedOid = $locks[$path][0]; $expectedSha = $locks[$path][1]
+            $oid = (git rev-parse "HEAD:$path").Trim()
+            if ($LASTEXITCODE -ne 0 -or $oid -ne $expectedOid) { throw 'LOCK_BLOB_OID_MISMATCH' }
+            $raw = Read-RawBlob $oid
+            $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant()
+            if ($sha -ne $expectedSha) { throw 'CANONICAL_LOCK_HASH_MISMATCH' }
+            if ($materialize) { [IO.File]::WriteAllBytes((Join-Path $PWD $path), $raw) }
+            $working = [IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($working)).ToLowerInvariant()
+            if (-not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working) -or $workingSha -ne $expectedSha) { throw 'WORKING_LOCK_BYTES_CHANGED' }
+            if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+            "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$sha raw_bytes_equal=true index_unchanged=true"
+            }
+          }
+          Assert-DesktopLock 'before-frozen-fetch'
+          cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'FROZEN_DESKTOP_FETCH_FAILED' }
+          Assert-DesktopLock 'after-frozen-fetch'
+
+      - name: D - Desktop default release build
+        id: desktop_build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib, json, os, re, shutil, subprocess, sys, tomllib
+          from pathlib import Path
+          from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def read_state(name):
+              raw = (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).read_bytes()
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              value = json.loads(raw)
+              if set(value)!={'schemaVersion','sourceHead','runId','runAttempt','data'} or value['schemaVersion']!=1 or value['sourceHead']!=os.environ['GITHUB_SHA'] or value['runId']!=os.environ['GITHUB_RUN_ID'] or value['runAttempt']!=os.environ['GITHUB_RUN_ATTEMPT']:
+                  raise ValueError('INVENTORY_STATE_BINDING_MISMATCH')
+              return value['data']
+          def write_state(name,data):
+              value = dict(schemaVersion=1,sourceHead=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],data=data)
+              raw = json.dumps(value,sort_keys=True,separators=(',',':')).encode('utf-8')
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              with (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).open('xb') as out:
+                  out.write(raw)
+          def main():
+              root = Path.cwd()
+              read_state('toolchain')
               args = ['cargo','+1.88.0','build','--release','--locked','--offline','--target','x86_64-pc-windows-msvc','--manifest-path','desktop/Cargo.toml','--bin','shirushi-desktop']
+              env = os.environ.copy(); env['RUSTC_LOG'] = 'rustc_codegen_ssa::back::link=info'
               env = os.environ.copy(); env['RUSTC_LOG'] = 'rustc_codegen_ssa::back::link=info'
               emit('DESKTOP_RELEASE_BUILD_STAGE','STARTED')
               try:
@@ -816,19 +931,104 @@ jobs:
                       errors[i] = line[:500]
                   emit('DESKTOP_BUILD_FAILURE', dict(exitCode=p.returncode, boundedErrors=errors, rawLogPublished=False))
                   raise ValueError('DEFAULT_DESKTOP_RELEASE_BUILD_FAILED')
-              binary = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/release/shirushi-desktop.exe'
-              if not binary.is_file() or binary.is_symlink(): raise ValueError('DESKTOP_BINARY_NOT_REGULAR')
-              emit('DESKTOP_BINARY_PRESENT',True)
-              frozen_locks = [('desktop','desktop/Cargo.lock','cbfdaabcaea09497feba169e934af93941678c3e','d628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'),('helper','tools/f3a-rust-sdk-parity/Cargo.lock','634efc02b8059623d08913dfe8ab354efc8c3187','a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')]
-              for label, path, expected_oid, expected_sha in frozen_locks:
-                  oid = checked('post-build-'+label+'-lock-oid',['git','rev-parse','HEAD:'+path])
-                  raw_lock = checked('post-build-'+label+'-lock-blob',['git','cat-file','blob',expected_oid],raw=True)
-                  if oid!=expected_oid or sha(raw_lock)!=expected_sha or (root/path).read_bytes()!=raw_lock:
-                      raise ValueError('POST_BUILD_LOCK_BYTES_CHANGED')
-                  if sha(index_path.read_bytes())!=index_before: raise ValueError('POST_BUILD_INDEX_CHANGED')
-                  emit('LOCK_EVIDENCE',dict(stage='after-release-build',path=path,blob=oid,bytes=len(raw_lock),sha256=expected_sha,raw_bytes_equal=True,index_unchanged=True))
               lines = [s for s in log.splitlines() if 'back::link' in s and 'shirushi_desktop' in s and 'link.exe' in s and '.exe' in s]
               candidates = {m.group(1).replace('\\\\','\\') for s in lines for m in re.finditer(r'"([^"\r\n]*[\\/]link\.exe)"',s,re.I)}
+              sdk = sorted(set(re.findall(r'Windows Kits(?:\\\\|[\\/])10(?:\\\\|[\\/])lib(?:\\\\|[\\/])([0-9.]+)','\n'.join(lines),re.I)))
+              if len(candidates)==1 and len(next(iter(candidates)))>4096: raise ValueError('LINKER_PATH_EVIDENCE_TOO_LARGE')
+              write_state('build',dict(command=args,exitCode=p.returncode,state='SUCCEEDED',linkerCandidates=sorted(candidates) if len(candidates)==1 else [],windowsSdkVersionsFromLinkInvocation=sdk or ['UNPROVEN']))
+          try: main()
+          except Exception as error:
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch("[A-Z0-9_]+",str(error)) else type(error).__name__
+              emit("DESKTOP_EVIDENCE_FAILURE",dict(code=code)); sys.exit(1)
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_INVENTORY_STEP_FAILED' }
+
+      - name: E - Post-build locks and Desktop EXE presence
+        id: desktop_post_build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $locks = @{
+            'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
+          }
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          function Read-InventoryState([string]$name) {
+            $file = Join-Path $env:DESKTOP_INVENTORY_STATE_DIR ($name + '.json')
+            if (-not [IO.File]::Exists($file) -or (Get-Item -LiteralPath $file).Length -gt 1048576) { throw 'INVENTORY_STATE_UNAVAILABLE' }
+            $value = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+            if ($value.schemaVersion -ne 1 -or $value.sourceHead -ne '${{ github.sha }}' -or $value.runId -ne $env:GITHUB_RUN_ID -or $value.runAttempt -ne $env:GITHUB_RUN_ATTEMPT) { throw 'INVENTORY_STATE_BINDING_MISMATCH' }
+            return $value.data
+          }
+          $indexBefore = '${{ steps.desktop_preflight.outputs.index_sha }}'
+          if ($indexBefore -notmatch '^[0-9A-F]{64}$' -or (Read-InventoryState 'preflight').indexSha -ne $indexBefore) { throw 'INDEX_BASELINE_UNAVAILABLE_OR_CHANGED' }
+          function Read-RawBlob([string]$oid) {
+            $start = [Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [Diagnostics.Process]::Start($start)
+            $memory = [IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+          }
+          function Assert-DesktopLock([string]$stage, [bool]$materialize = $false) {
+            foreach ($path in @('desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock')) {
+            $expectedOid = $locks[$path][0]; $expectedSha = $locks[$path][1]
+            $oid = (git rev-parse "HEAD:$path").Trim()
+            if ($LASTEXITCODE -ne 0 -or $oid -ne $expectedOid) { throw 'LOCK_BLOB_OID_MISMATCH' }
+            $raw = Read-RawBlob $oid
+            $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant()
+            if ($sha -ne $expectedSha) { throw 'CANONICAL_LOCK_HASH_MISMATCH' }
+            if ($materialize) { [IO.File]::WriteAllBytes((Join-Path $PWD $path), $raw) }
+            $working = [IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($working)).ToLowerInvariant()
+            if (-not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working) -or $workingSha -ne $expectedSha) { throw 'WORKING_LOCK_BYTES_CHANGED' }
+            if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+            "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$sha raw_bytes_equal=true index_unchanged=true"
+            }
+          }
+          Assert-DesktopLock 'after-release-build'
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/shirushi-desktop.exe'
+          if (-not [IO.File]::Exists($binary)) { throw 'DESKTOP_BINARY_ABSENT' }
+          $item = Get-Item -LiteralPath $binary
+          if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'DESKTOP_BINARY_NOT_REGULAR' }
+          'DESKTOP_BINARY_PRESENT: true'
+
+      - name: F - Passive observed MSVC linker identity
+        id: desktop_linker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib, json, os, re, shutil, subprocess, sys, tomllib
+          from pathlib import Path
+          from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def read_state(name):
+              raw = (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).read_bytes()
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              value = json.loads(raw)
+              if set(value)!={'schemaVersion','sourceHead','runId','runAttempt','data'} or value['schemaVersion']!=1 or value['sourceHead']!=os.environ['GITHUB_SHA'] or value['runId']!=os.environ['GITHUB_RUN_ID'] or value['runAttempt']!=os.environ['GITHUB_RUN_ATTEMPT']:
+                  raise ValueError('INVENTORY_STATE_BINDING_MISMATCH')
+              return value['data']
+          def write_state(name,data):
+              value = dict(schemaVersion=1,sourceHead=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],data=data)
+              raw = json.dumps(value,sort_keys=True,separators=(',',':')).encode('utf-8')
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              with (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).open('xb') as out:
+                  out.write(raw)
+          def main():
+              root = Path.cwd()
+              build = read_state('build')
+              toolchain = read_state('toolchain')
+              candidates = set(build['linkerCandidates'])
+              source_head = toolchain['sourceCommit']; rust_fields = toolchain['rustc']; cargo_fields = toolchain['cargo']; args = build['command']; sdk = build['windowsSdkVersionsFromLinkInvocation']
               linker_identity = dict(basename=None,sha256=None,FileVersion=None,ProductVersion=None,CompanyNameMicrosoftMatch=None,ProductNameMatch=None,msvcToolset=None,FileVersionInfoAvailable=False,identitySource='observed rustc Desktop link invocation',classification='MSVC_LINKER_IDENTITY_UNPROVEN',publisherAuthenticity='NOT_ESTABLISHED')
               if len(candidates)==1:
                   linker = Path(next(iter(candidates)))
@@ -840,21 +1040,21 @@ jobs:
                       linker_identity['sha256'] = sha(linker.read_bytes())
                       # Built-in passive metadata only. The file path travels on private stdin.
                       metadata_script = r'''$ErrorActionPreference = 'Stop'
-          $result = @{FileVersionInfoAvailable=$false; FileVersion=$null; ProductVersion=$null; CompanyNameMicrosoftMatch=$null; ProductNameMatch=$null}
-          function Version-Only([string]$value) {
-            if ($value -match '^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s+.*)?$') { return $Matches[1] }
-            return $null
-          }
-          try {
-            $file = [Console]::In.ReadToEnd() | ConvertFrom-Json
-            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
-            $result.FileVersionInfoAvailable = [bool]($info.FileVersion -or $info.ProductVersion -or $info.CompanyName -or $info.ProductName)
-            $result.FileVersion = Version-Only $info.FileVersion
-            $result.ProductVersion = Version-Only $info.ProductVersion
-            if ($info.CompanyName) { $result.CompanyNameMicrosoftMatch = $info.CompanyName.Trim() -eq 'Microsoft Corporation' }
-            if ($info.ProductName) { $result.ProductNameMatch = $info.ProductName.Trim() -match '^Microsoft(?:\u00AE|\(R\))?\s+Visual Studio(?:\u00AE|\(R\))?$' }
-          } catch { }
-          $result | ConvertTo-Json -Compress'''
+              $result = @{FileVersionInfoAvailable=$false; FileVersion=$null; ProductVersion=$null; CompanyNameMicrosoftMatch=$null; ProductNameMatch=$null}
+              function Version-Only([string]$value) {
+                if ($value -match '^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s+.*)?$') { return $Matches[1] }
+                return $null
+              }
+              try {
+                $file = [Console]::In.ReadToEnd() | ConvertFrom-Json
+                $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
+                $result.FileVersionInfoAvailable = [bool]($info.FileVersion -or $info.ProductVersion -or $info.CompanyName -or $info.ProductName)
+                $result.FileVersion = Version-Only $info.FileVersion
+                $result.ProductVersion = Version-Only $info.ProductVersion
+                if ($info.CompanyName) { $result.CompanyNameMicrosoftMatch = $info.CompanyName.Trim() -eq 'Microsoft Corporation' }
+                if ($info.ProductName) { $result.ProductNameMatch = $info.ProductName.Trim() -match '^Microsoft(?:\u00AE|\(R\))?\s+Visual Studio(?:\u00AE|\(R\))?$' }
+              } catch { }
+              $result | ConvertTo-Json -Compress'''
                       try:
                           metadata = subprocess.run(['pwsh','-NoLogo','-NoProfile','-NonInteractive','-Command',metadata_script],input=json.dumps(str(linker)).encode('utf-8'),capture_output=True,timeout=30)
                           emit('TOOL_QUERY_RESULT',dict(role='linker-file-version',tool='pwsh.exe',exitCode=metadata.returncode,stdoutBytes=len(metadata.stdout),stderrBytes=len(metadata.stderr),state='OBSERVED',linkerExecuted=False))
@@ -870,11 +1070,41 @@ jobs:
               emit('DESKTOP_LINKER_IDENTITY',linker_identity)
               emit('LINKER_HELP_QUERY_HISTORICAL',dict(ciRun=36943159650,role='linker-version',tool='link.exe',exitCode=1100,stdoutBytes=3764,stderrBytes=0,executedThisRun=False,notAcceptedAsSuccess=True))
               if contradictory: raise ValueError('MSVC_LINKER_IDENTITY_CONTRADICTORY')
-              # Publish only recognized bounded identity fields, never raw query output.
-              rust_fields = [s for s in rust.splitlines() if re.fullmatch(r'(?:rustc |binary: |commit-hash: |commit-date: |host: |release: |LLVM version: )[A-Za-z0-9 .()_-]+',s)]
-              cargo_fields = [s for s in cargo.splitlines() if re.fullmatch(r'(?:cargo |release: |commit-hash: |commit-date: |host: |libgit2: |libcurl: |ssl: |os: )[A-Za-z0-9 .(),:_+-]+',s)]
-              sdk = sorted(set(re.findall(r'Windows Kits(?:\\\\|[\\/])10(?:\\\\|[\\/])lib(?:\\\\|[\\/])([0-9.]+)','\n'.join(lines),re.I)))
               emit('DESKTOP_RELEASE_BUILD', dict(sourceCommit=source_head,rustc=rust_fields,cargo=cargo_fields,host=next((s.split(': ',1)[1] for s in rust_fields if s.startswith('host: ')),'UNPROVEN'),target='x86_64-pc-windows-msvc',profile='Cargo default release',command=args,linker=linker_identity,windowsSdkVersionsFromLinkInvocation=sdk or ['UNPROVEN']))
+              write_state('linker',linker_identity)
+          try: main()
+          except Exception as error:
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch("[A-Z0-9_]+",str(error)) else type(error).__name__
+              emit("DESKTOP_EVIDENCE_FAILURE",dict(code=code)); sys.exit(1)
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_INVENTORY_STEP_FAILED' }
+
+      - name: G - Static Desktop PE inventory
+        id: desktop_pe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib, json, os, re, shutil, subprocess, sys, tomllib
+          from pathlib import Path
+          from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def read_state(name):
+              raw = (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).read_bytes()
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              value = json.loads(raw)
+              if set(value)!={'schemaVersion','sourceHead','runId','runAttempt','data'} or value['schemaVersion']!=1 or value['sourceHead']!=os.environ['GITHUB_SHA'] or value['runId']!=os.environ['GITHUB_RUN_ID'] or value['runAttempt']!=os.environ['GITHUB_RUN_ATTEMPT']:
+                  raise ValueError('INVENTORY_STATE_BINDING_MISMATCH')
+              return value['data']
+          def write_state(name,data):
+              value = dict(schemaVersion=1,sourceHead=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],data=data)
+              raw = json.dumps(value,sort_keys=True,separators=(',',':')).encode('utf-8')
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              with (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).open('xb') as out:
+                  out.write(raw)
+          def main():
+              root = Path.cwd()
+              read_state('build')
+              binary = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/release/shirushi-desktop.exe'
               try:
                   raw = binary.read_bytes(); pe = PE(raw)
                   if pe.machine != 0x8664 or pe.subsystem != 2: raise ValueError('DESKTOP_PE_TARGET_MISMATCH')
@@ -907,7 +1137,39 @@ jobs:
                   emit('DESKTOP_PE_INVENTORY_FAILURE',dict(classification='DESKTOP_PE_INVENTORY_FAILED',failureKind=type(error).__name__))
                   raise ValueError('DESKTOP_PE_INVENTORY_FAILED') from None
               emit('DESKTOP_RELEASE_BINARY',dict(filename=binary.name,size=len(raw),sha256=sha(raw),pe=evidence,classificationScope='host System32 inventory/API-set contracts; not universal OS availability; unknown remains unknown'))
-              # Locked dependency source evidence, not a claim of complete dynamic closure.
+              write_state('pe',dict(filename=binary.name,size=len(raw),sha256=sha(raw),pe=evidence))
+          try: main()
+          except Exception as error:
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch("[A-Z0-9_]+",str(error)) else type(error).__name__
+              emit("DESKTOP_EVIDENCE_FAILURE",dict(code=code)); sys.exit(1)
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_INVENTORY_STEP_FAILED' }
+
+      - name: H - WebView2 source contract and helper comparison
+        id: desktop_source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib, json, os, re, shutil, subprocess, sys, tomllib
+          from pathlib import Path
+          from scripts.inspect_f3a_release_helper import PE, emit, sha, VC_RUNTIME
+          def read_state(name):
+              raw = (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).read_bytes()
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              value = json.loads(raw)
+              if set(value)!={'schemaVersion','sourceHead','runId','runAttempt','data'} or value['schemaVersion']!=1 or value['sourceHead']!=os.environ['GITHUB_SHA'] or value['runId']!=os.environ['GITHUB_RUN_ID'] or value['runAttempt']!=os.environ['GITHUB_RUN_ATTEMPT']:
+                  raise ValueError('INVENTORY_STATE_BINDING_MISMATCH')
+              return value['data']
+          def write_state(name,data):
+              value = dict(schemaVersion=1,sourceHead=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],data=data)
+              raw = json.dumps(value,sort_keys=True,separators=(',',':')).encode('utf-8')
+              if len(raw)>1048576: raise ValueError('INVENTORY_STATE_TOO_LARGE')
+              with (Path(os.environ['DESKTOP_INVENTORY_STATE_DIR'])/(name+'.json')).open('xb') as out:
+                  out.write(raw)
+          def main():
+              root = Path.cwd()
+              pe_result = read_state('pe'); evidence = pe_result['pe']
               package = next(p for p in tomllib.loads((root/'desktop/Cargo.lock').read_text())['package'] if p['name']=='webview2-com-sys')
               cache = Path(os.environ.get('CARGO_HOME',str(Path.home()/'.cargo')))/'registry/src'
               sources = list(cache.glob('*/webview2-com-sys-'+package['version']+'/src/lib.rs'))
@@ -921,8 +1183,8 @@ jobs:
               creates_environment = 'CreateCoreWebView2EnvironmentWithOptions(' in wry_source
               app_source = (root/'desktop/src/lib.rs').read_text()
               webview = 'WebviewWindowBuilder::new' in app_source
-              static_webview = any(category(r['dll'])=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['imports'])
-              delay_webview = any(category(r['dll'])=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['delayImports'])
+              static_webview = any(r['classification']=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['imports'])
+              delay_webview = any(r['classification']=='WEBVIEW2_RUNTIME_OR_LOADER' for r in evidence['delayImports'])
               webview_status = 'WEBVIEW2_DIRECT_IMPORT' if static_webview else 'WEBVIEW2_DYNAMIC_RUNTIME_PREREQUISITE' if loader and webview and creates_environment else 'WEBVIEW2_STATUS_UNPROVEN'
               vc = sorted({r['dll'] for r in evidence['imports']+evidence['delayImports'] if r['classification']=='VC_RUNTIME'})
               comparison = 'SAME_VC_RUNTIME_FAMILY' if vc and all(r.startswith('vcruntime140') for r in vc) else 'DIFFERENT_RUNTIME_REQUIREMENTS' if vc else 'INSUFFICIENT_EVIDENCE'
@@ -933,21 +1195,77 @@ jobs:
               emit('DESKTOP_DYNAMIC_LOAD_SOURCE',dict(webview2SysVersion=package['version'],webview2SourceSha256=sha(sources[0].read_bytes()),wryVersion=wry_package['version'],wrySourceSha256=sha(wry_sources[0].read_bytes()),wryCreatesWebview2Environment=creates_environment,msvcStaticLoaderDeclaration=loader,applicationCreatesWebview=webview,loaderIsNotRuntime=True,directWebviewImport=static_webview,delayWebviewImport=delay_webview,webview2Status=webview_status,completeRuntimeClosure='UNPROVEN',runtimeLaunch='NOT_RUN'))
               emit('DESKTOP_HELPER_COMPARISON',dict(helperAcceptedEvidence='CI36854166551; vcruntime140.dll and UCRT; bounded sample no other non-system modules',desktopVcImports=vc,vcFamily=comparison,relationship=relationship,additionalRuntimeRequirements=['WebView2 Runtime'] if loader and webview and creates_environment else [],sharedDeliverySolved=False,completeRuntimeClosure='UNPROVEN'))
               if not loader or not webview or not creates_environment: raise ValueError('WEBVIEW2_SOURCE_CONTRACT_MISMATCH')
-              gate = 'DESKTOP_RELEASE_NATIVE_INVENTORY_PASS' if linker_identity['classification']=='MSVC_LINKER_IDENTITY_ESTABLISHED' else 'DESKTOP_RELEASE_NATIVE_INVENTORY_PARTIAL_LINKER_IDENTITY_UNPROVEN'
-              emit('DESKTOP_NATIVE_INVENTORY_RESULT',dict(classification=gate,peInventory='COMPLETED',linkerIdentity=linker_identity['classification']))
-              with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as summary:
-                  summary.write('Desktop default release build/PE: PASS\nGate: '+gate+'\nLinker identity: '+linker_identity['classification']+'\nDesktop size: '+str(len(raw))+'\nDesktop SHA-256: '+sha(raw)+'\nWebView2: '+webview_status+'\nVC runtime imports: '+', '.join(vc)+'\nHelper comparison: '+relationship+'; VC family: '+comparison+'\n')
-              if gate!='DESKTOP_RELEASE_NATIVE_INVENTORY_PASS': raise ValueError(gate)
+              write_state('source',dict(webview2Status=webview_status,vcRuntimeImports=vc,vcFamily=comparison,relationship=relationship,size=pe_result['size'],sha256=pe_result['sha256']))
           try: main()
           except Exception as error:
-              code = str(error) if isinstance(error,ValueError) and re.fullmatch('[A-Z0-9_]+',str(error)) else type(error).__name__
-              emit('DESKTOP_EVIDENCE_FAILURE',dict(code=code)); sys.exit(1)
+              code = str(error) if isinstance(error,ValueError) and re.fullmatch("[A-Z0-9_]+",str(error)) else type(error).__name__
+              emit("DESKTOP_EVIDENCE_FAILURE",dict(code=code)); sys.exit(1)
           '@ | python -B -
-            if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_RELEASE_INVENTORY_FAILED' }
-            Assert-DesktopLock 'after-release-build-PE'
-            'RUNTIME_MODULE_OBSERVATION: NOT RUN; static inventory only; release Desktop intentionally not launched'
-          } finally {
+          if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_INVENTORY_STEP_FAILED' }
+
+      - name: I - Final locks, index and Gate summary
+        id: desktop_final
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $locks = @{
+            'desktop/Cargo.lock' = @('cbfdaabcaea09497feba169e934af93941678c3e', 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069')
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = @('634efc02b8059623d08913dfe8ab354efc8c3187', 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')
+          }
+          if ((git rev-parse HEAD) -ne '${{ github.sha }}' -or $LASTEXITCODE -ne 0) { throw 'CHECKOUT_HEAD_MISMATCH' }
+          $indexPath = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          function Read-InventoryState([string]$name) {
+            $file = Join-Path $env:DESKTOP_INVENTORY_STATE_DIR ($name + '.json')
+            if (-not [IO.File]::Exists($file) -or (Get-Item -LiteralPath $file).Length -gt 1048576) { throw 'INVENTORY_STATE_UNAVAILABLE' }
+            $value = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+            if ($value.schemaVersion -ne 1 -or $value.sourceHead -ne '${{ github.sha }}' -or $value.runId -ne $env:GITHUB_RUN_ID -or $value.runAttempt -ne $env:GITHUB_RUN_ATTEMPT) { throw 'INVENTORY_STATE_BINDING_MISMATCH' }
+            return $value.data
+          }
+          $indexBefore = '${{ steps.desktop_preflight.outputs.index_sha }}'
+          if ($indexBefore -notmatch '^[0-9A-F]{64}$' -or (Read-InventoryState 'preflight').indexSha -ne $indexBefore) { throw 'INDEX_BASELINE_UNAVAILABLE_OR_CHANGED' }
+          function Read-RawBlob([string]$oid) {
+            $start = [Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [Diagnostics.Process]::Start($start)
+            $memory = [IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              return ,$memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+          }
+          function Assert-DesktopLock([string]$stage, [bool]$materialize = $false) {
+            foreach ($path in @('desktop/Cargo.lock', 'tools/f3a-rust-sdk-parity/Cargo.lock')) {
+            $expectedOid = $locks[$path][0]; $expectedSha = $locks[$path][1]
+            $oid = (git rev-parse "HEAD:$path").Trim()
+            if ($LASTEXITCODE -ne 0 -or $oid -ne $expectedOid) { throw 'LOCK_BLOB_OID_MISMATCH' }
+            $raw = Read-RawBlob $oid
+            $sha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant()
+            if ($sha -ne $expectedSha) { throw 'CANONICAL_LOCK_HASH_MISMATCH' }
+            if ($materialize) { [IO.File]::WriteAllBytes((Join-Path $PWD $path), $raw) }
+            $working = [IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $workingSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($working)).ToLowerInvariant()
+            if (-not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working) -or $workingSha -ne $expectedSha) { throw 'WORKING_LOCK_BYTES_CHANGED' }
+            if ((Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash -ne $indexBefore) { throw 'INDEX_CHANGED' }
+            "LOCK_EVIDENCE: stage=$stage path=$path blob=$oid bytes=$($raw.Length) sha256=$sha raw_bytes_equal=true index_unchanged=true"
+            }
+          }
+          try {
             Assert-DesktopLock 'final'
+            $required = @('${{ steps.desktop_preflight.outcome }}','${{ steps.desktop_toolchain.outcome }}','${{ steps.desktop_fetch.outcome }}','${{ steps.desktop_build.outcome }}','${{ steps.desktop_post_build.outcome }}','${{ steps.desktop_linker.outcome }}','${{ steps.desktop_pe.outcome }}','${{ steps.desktop_source.outcome }}')
+            if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'DESKTOP_INVENTORY_PRECEDING_STEP_FAILED' }
+            $linker = Read-InventoryState 'linker'
+            $source = Read-InventoryState 'source'
+            $gate = if ($linker.classification -eq 'MSVC_LINKER_IDENTITY_ESTABLISHED') { 'DESKTOP_RELEASE_NATIVE_INVENTORY_PASS' } else { 'DESKTOP_RELEASE_NATIVE_INVENTORY_PARTIAL_LINKER_IDENTITY_UNPROVEN' }
+            'DESKTOP_NATIVE_INVENTORY_RESULT: ' + (@{classification=$gate; peInventory='COMPLETED'; linkerIdentity=$linker.classification} | ConvertTo-Json -Compress)
+            @('Desktop default release build/PE: PASS', ('Gate: ' + $gate), ('Linker identity: ' + $linker.classification), ('Desktop size: ' + $source.size), ('Desktop SHA-256: ' + $source.sha256), ('WebView2: ' + $source.webview2Status), ('VC runtime imports: ' + ($source.vcRuntimeImports -join ', ')), ('Helper comparison: ' + $source.relationship + '; VC family: ' + $source.vcFamily)) >> $env:GITHUB_STEP_SUMMARY
+            if ($gate -ne 'DESKTOP_RELEASE_NATIVE_INVENTORY_PASS') { throw $gate }
+          } finally {
             @('DESKTOP_RELEASE_NATIVE_INVENTORY_CANARY', 'Exact target: shirushi-desktop; Rust1.88.0; x86_64-pc-windows-msvc; Cargo default release; no manual-canary feature', 'Existing Desktop93/93 Rust1.88 tests: accepted CI36934766526 baseline control; NOT RERUN (no source change)', 'Desktop/runtime execution: NOT RUN; static inventory only; development BridgeHost/debug-only boundaries unchanged', 'Helper integration/build: NOT RUN', 'Package/bundle/installer generation: NOT RUN; bundle.active remains false', 'Artifact upload: NOT RUN; ARTIFACT_UPLOAD_COUNT = 0', 'Native inventory only; complete runtime closure and zero-setup NOT PROVEN', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
-            'ARTIFACT_UPLOAD_COUNT: 0; INDEX_UNCHANGED: true'
+            'ARTIFACT_UPLOAD_COUNT: 0'
           }
