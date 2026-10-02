@@ -773,7 +773,7 @@ jobs:
               emit('DESKTOP_BUILD_ENVIRONMENT', dict(unexpectedOverrideNames=overrides, cargoConfigurationPresent=config_present, ICU4X_DATA_DIR='UNSET' if 'ICU4X_DATA_DIR' not in os.environ else 'PRESENT', addedCodegenFlags=[], diagnosticOnlyFlag='RUSTC_LOG=rustc_codegen_ssa::back::link=info'))
               if overrides or config_present:
                   raise ValueError('UNCONTROLLED_BUILD_ENVIRONMENT')
-              def checked(role, query, accepted_exit_codes=(0,), informational_linker=False):
+              def checked(role, query, raw=False):
                   tool = Path(shutil.which(query[0]) or query[0]).name
                   emit('TOOL_QUERY_STAGE', dict(role=role,tool=tool,state='STARTED'))
                   try:
@@ -782,24 +782,20 @@ jobs:
                       emit('TOOL_QUERY_FAILURE', dict(role=role,tool=tool,exitCode=None,stdoutBytes=len(getattr(error,'stdout',None) or b''),stderrBytes=len(getattr(error,'stderr',None) or b'')))
                       raise ValueError('TOOL_QUERY_DID_NOT_COMPLETE') from None
                   facts = dict(role=role,tool=tool,exitCode=p.returncode,stdoutBytes=len(p.stdout),stderrBytes=len(p.stderr))
-                  text = (p.stdout+b'\n'+p.stderr).decode('utf-8','replace')
-                  version = None
-                  accepted = p.returncode in accepted_exit_codes
-                  if informational_linker:
-                      # This exact /? query may return 1 for help. Not a general nonzero policy.
-                      versions = re.findall(r'^Microsoft \(R\) Incremental Linker Version ([0-9]+(?:\.[0-9]+){2,3})\s*$',text,re.M)
-                      help_identity = re.search(r'^\s*usage:\s*LINK\s+\[options\]\s+\[files\]\s+\[@commandfile\]\s*$',text,re.M|re.I) is not None
-                      diagnostic = re.search(r'^\s*(?:LINK\s*:\s*)?(?:fatal error|error)\s+LNK[0-9]+\b',text,re.M|re.I) is not None
-                      version = 'Microsoft (R) Incremental Linker Version '+versions[0] if len(versions)==1 else None
-                      accepted = bool(version and not diagnostic and (accepted or (p.returncode==1 and help_identity)))
-                  if len(p.stdout)>131072 or len(p.stderr)>131072 or not accepted:
+                  if len(p.stdout)>131072 or len(p.stderr)>131072 or p.returncode!=0:
                       emit('TOOL_QUERY_FAILURE', facts)
                       raise ValueError('TOOL_QUERY_REJECTED')
-                  emit('TOOL_QUERY_RESULT', dict(**facts,state='ACCEPTED',informationalNonzeroAccepted=informational_linker and p.returncode==1,**({'version':version} if version else {})))
-                  return version if informational_linker else text.strip()
+                  emit('TOOL_QUERY_RESULT', dict(**facts,state='ACCEPTED'))
+                  return p.stdout if raw else (p.stdout+b'\n'+p.stderr).decode('utf-8','replace').strip()
+              source_head = checked('source-head',['git','rev-parse','HEAD'])
+              if re.fullmatch(r'[0-9a-f]{40}',source_head) is None or source_head!=os.environ['GITHUB_SHA']:
+                  raise ValueError('SOURCE_HEAD_MISMATCH')
+              emit('SOURCE_HEAD_MATCH',True)
               rust, cargo = checked('rustc-identity',['rustc','-vV']), checked('cargo-identity',['cargo','-vV'])
               if not rust.startswith('rustc 1.88.0 ') or not cargo.startswith('cargo 1.88.0 '):
                   raise ValueError('TOOLCHAIN_MISMATCH')
+              index_path = Path(checked('git-index-path',['git','rev-parse','--git-path','index']))
+              index_before = sha(index_path.read_bytes())
               args = ['cargo','+1.88.0','build','--release','--locked','--offline','--target','x86_64-pc-windows-msvc','--manifest-path','desktop/Cargo.toml','--bin','shirushi-desktop']
               env = os.environ.copy(); env['RUSTC_LOG'] = 'rustc_codegen_ssa::back::link=info'
               emit('DESKTOP_RELEASE_BUILD_STAGE','STARTED')
@@ -823,48 +819,93 @@ jobs:
               binary = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/release/shirushi-desktop.exe'
               if not binary.is_file() or binary.is_symlink(): raise ValueError('DESKTOP_BINARY_NOT_REGULAR')
               emit('DESKTOP_BINARY_PRESENT',True)
+              frozen_locks = [('desktop','desktop/Cargo.lock','cbfdaabcaea09497feba169e934af93941678c3e','d628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'),('helper','tools/f3a-rust-sdk-parity/Cargo.lock','634efc02b8059623d08913dfe8ab354efc8c3187','a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8')]
+              for label, path, expected_oid, expected_sha in frozen_locks:
+                  oid = checked('post-build-'+label+'-lock-oid',['git','rev-parse','HEAD:'+path])
+                  raw_lock = checked('post-build-'+label+'-lock-blob',['git','cat-file','blob',expected_oid],raw=True)
+                  if oid!=expected_oid or sha(raw_lock)!=expected_sha or (root/path).read_bytes()!=raw_lock:
+                      raise ValueError('POST_BUILD_LOCK_BYTES_CHANGED')
+                  if sha(index_path.read_bytes())!=index_before: raise ValueError('POST_BUILD_INDEX_CHANGED')
+                  emit('LOCK_EVIDENCE',dict(stage='after-release-build',path=path,blob=oid,bytes=len(raw_lock),sha256=expected_sha,raw_bytes_equal=True,index_unchanged=True))
               lines = [s for s in log.splitlines() if 'back::link' in s and 'shirushi_desktop' in s and 'link.exe' in s and '.exe' in s]
               candidates = {m.group(1).replace('\\\\','\\') for s in lines for m in re.finditer(r'"([^"\r\n]*[\\/]link\.exe)"',s,re.I)}
-              if len(candidates) != 1: raise ValueError('ACTUAL_LINKER_IDENTITY_UNRESOLVED')
-              linker = Path(candidates.pop())
-              msvc = re.search(r'[\\/]MSVC[\\/]([^\\/]+)',str(linker),re.I)
-              if linker.name.lower()!='link.exe' or not linker.is_file() or not msvc:
-                  raise ValueError('EXPECTED_MSVC_LINKER_NOT_OBSERVED')
-              version_line = checked('linker-version',[str(linker),'/?'],informational_linker=True)
-              source_head = checked('source-head',['git','rev-parse','HEAD'])
-              if re.fullmatch(r'[0-9a-f]{40}',source_head) is None: raise ValueError('SOURCE_HEAD_INVALID')
+              linker_identity = dict(basename=None,sha256=None,FileVersion=None,ProductVersion=None,CompanyNameMicrosoftMatch=None,ProductNameMatch=None,msvcToolset=None,FileVersionInfoAvailable=False,identitySource='observed rustc Desktop link invocation',classification='MSVC_LINKER_IDENTITY_UNPROVEN',publisherAuthenticity='NOT_ESTABLISHED')
+              if len(candidates)==1:
+                  linker = Path(next(iter(candidates)))
+                  toolsets = set(re.findall(r'[\\/]MSVC[\\/]([0-9]+\.[0-9]+\.[0-9]+)(?=[\\/])',str(linker),re.I))
+                  if linker.name.lower()!='link.exe': raise ValueError('MSVC_LINKER_IDENTITY_CONTRADICTORY')
+                  linker_identity['basename'] = linker.name
+                  linker_identity['msvcToolset'] = next(iter(toolsets)) if len(toolsets)==1 else None
+                  if linker.is_file() and not linker.is_symlink() and linker.stat().st_size<=134217728:
+                      linker_identity['sha256'] = sha(linker.read_bytes())
+                      # Built-in passive metadata only. The file path travels on private stdin.
+                      metadata_script = r'''$ErrorActionPreference = 'Stop'
+          $result = @{FileVersionInfoAvailable=$false; FileVersion=$null; ProductVersion=$null; CompanyNameMicrosoftMatch=$null; ProductNameMatch=$null}
+          function Version-Only([string]$value) {
+            if ($value -match '^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s+.*)?$') { return $Matches[1] }
+            return $null
+          }
+          try {
+            $file = [Console]::In.ReadToEnd() | ConvertFrom-Json
+            $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
+            $result.FileVersionInfoAvailable = [bool]($info.FileVersion -or $info.ProductVersion -or $info.CompanyName -or $info.ProductName)
+            $result.FileVersion = Version-Only $info.FileVersion
+            $result.ProductVersion = Version-Only $info.ProductVersion
+            if ($info.CompanyName) { $result.CompanyNameMicrosoftMatch = $info.CompanyName.Trim() -eq 'Microsoft Corporation' }
+            if ($info.ProductName) { $result.ProductNameMatch = $info.ProductName.Trim() -match '^Microsoft(?:\u00AE|\(R\))?\s+Visual Studio(?:\u00AE|\(R\))?$' }
+          } catch { }
+          $result | ConvertTo-Json -Compress'''
+                      try:
+                          metadata = subprocess.run(['pwsh','-NoLogo','-NoProfile','-NonInteractive','-Command',metadata_script],input=json.dumps(str(linker)).encode('utf-8'),capture_output=True,timeout=30)
+                          emit('TOOL_QUERY_RESULT',dict(role='linker-file-version',tool='pwsh.exe',exitCode=metadata.returncode,stdoutBytes=len(metadata.stdout),stderrBytes=len(metadata.stderr),state='OBSERVED',linkerExecuted=False))
+                          if metadata.returncode==0 and len(metadata.stdout)<=4096 and len(metadata.stderr)<=4096:
+                              value = json.loads(metadata.stdout)
+                              if set(value)=={'FileVersionInfoAvailable','FileVersion','ProductVersion','CompanyNameMicrosoftMatch','ProductNameMatch'} and type(value['FileVersionInfoAvailable']) is bool and all(value[k] is None or type(value[k]) is bool for k in ('CompanyNameMicrosoftMatch','ProductNameMatch')) and all(value[k] is None or (type(value[k]) is str and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+',value[k])) for k in ('FileVersion','ProductVersion')):
+                                  linker_identity.update(value)
+                      except (subprocess.TimeoutExpired,OSError,ValueError,TypeError):
+                          pass
+              contradictory = linker_identity['CompanyNameMicrosoftMatch'] is False or linker_identity['ProductNameMatch'] is False
+              if not contradictory and linker_identity['basename'] and linker_identity['sha256'] and linker_identity['FileVersionInfoAvailable'] and linker_identity['CompanyNameMicrosoftMatch'] is True and linker_identity['ProductNameMatch'] is True and (linker_identity['FileVersion'] or linker_identity['ProductVersion']) and linker_identity['msvcToolset']:
+                  linker_identity['classification'] = 'MSVC_LINKER_IDENTITY_ESTABLISHED'
+              emit('DESKTOP_LINKER_IDENTITY',linker_identity)
+              emit('LINKER_HELP_QUERY_HISTORICAL',dict(ciRun=36943159650,role='linker-version',tool='link.exe',exitCode=1100,stdoutBytes=3764,stderrBytes=0,executedThisRun=False,notAcceptedAsSuccess=True))
+              if contradictory: raise ValueError('MSVC_LINKER_IDENTITY_CONTRADICTORY')
               # Publish only recognized bounded identity fields, never raw query output.
               rust_fields = [s for s in rust.splitlines() if re.fullmatch(r'(?:rustc |binary: |commit-hash: |commit-date: |host: |release: |LLVM version: )[A-Za-z0-9 .()_-]+',s)]
               cargo_fields = [s for s in cargo.splitlines() if re.fullmatch(r'(?:cargo |release: |commit-hash: |commit-date: |host: |libgit2: |libcurl: |ssl: |os: )[A-Za-z0-9 .(),:_+-]+',s)]
               sdk = sorted(set(re.findall(r'Windows Kits(?:\\\\|[\\/])10(?:\\\\|[\\/])lib(?:\\\\|[\\/])([0-9.]+)','\n'.join(lines),re.I)))
-              emit('DESKTOP_RELEASE_BUILD', dict(sourceCommit=source_head,rustc=rust_fields,cargo=cargo_fields,host=next((s.split(': ',1)[1] for s in rust_fields if s.startswith('host: ')),'UNPROVEN'),target='x86_64-pc-windows-msvc',profile='Cargo default release',command=args,linker=dict(basename=linker.name,sha256=sha(linker.read_bytes()),version=version_line,msvcToolset=msvc.group(1),identitySource='observed rustc Desktop link invocation'),windowsSdkVersionsFromLinkInvocation=sdk or ['UNPROVEN']))
-              raw = binary.read_bytes(); pe = PE(raw)
-              if pe.machine != 0x8664 or pe.subsystem != 2: raise ValueError('DESKTOP_PE_TARGET_MISMATCH')
-              system = Path(os.environ['SystemRoot'])/'System32'
-              names = {p.name.lower() for p in system.glob('*.dll')}
-              evidence = pe.evidence(names,root)
-              def category(name):
-                  name = name.lower()
-                  if VC_RUNTIME.fullmatch(name): return 'VC_RUNTIME'
-                  if name == 'ucrtbase.dll' or name.startswith('api-ms-win-crt-'): return 'UCRT'
-                  if name == 'webview2loader.dll' or name.startswith('embeddedbrowserwebview'): return 'WEBVIEW2_RUNTIME_OR_LOADER'
-                  if name.startswith(('api-ms-win-','ext-ms-win-')): return 'WINDOWS_API_SET'
-                  if name in names: return 'WINDOWS_SYSTEM'
-                  return 'UNKNOWN'
-              for row in evidence['imports']+evidence['delayImports']:
-                  row['classification'] = category(row['dll'])
-              # Reuse helper PE parsing; publish only this product's safe PDB basename.
-              debug_rva, debug_size = pe.directory(6)
-              for i, row in enumerate(evidence['debugEntries']):
-                  if row.get('pdbReferencePresent'):
-                      pos = pe.offset(debug_rva+i*28,28)
-                      _,_,_,_,kind,length,_,pointer = pe.unpack('<IIHHIIII',pos)
-                      data = pe.read(pointer,length)
-                      offset = 24 if data[:4]==b'RSDS' else 16
-                      from pathlib import PureWindowsPath
-                      base = PureWindowsPath(data[offset:].split(b'\0',1)[0].decode('utf-8','replace')).name
-                      row['pdbBasename'] = base if re.fullmatch(r'shirushi[_-]desktop\.pdb',base) else 'REDACTED'
-              evidence['resources']['totalLeafBytes'] = sum(r['size'] for r in evidence['resources']['leaves'])
+              emit('DESKTOP_RELEASE_BUILD', dict(sourceCommit=source_head,rustc=rust_fields,cargo=cargo_fields,host=next((s.split(': ',1)[1] for s in rust_fields if s.startswith('host: ')),'UNPROVEN'),target='x86_64-pc-windows-msvc',profile='Cargo default release',command=args,linker=linker_identity,windowsSdkVersionsFromLinkInvocation=sdk or ['UNPROVEN']))
+              try:
+                  raw = binary.read_bytes(); pe = PE(raw)
+                  if pe.machine != 0x8664 or pe.subsystem != 2: raise ValueError('DESKTOP_PE_TARGET_MISMATCH')
+                  system = Path(os.environ['SystemRoot'])/'System32'
+                  names = {p.name.lower() for p in system.glob('*.dll')}
+                  evidence = pe.evidence(names,root)
+                  def category(name):
+                      name = name.lower()
+                      if VC_RUNTIME.fullmatch(name): return 'VC_RUNTIME'
+                      if name == 'ucrtbase.dll' or name.startswith('api-ms-win-crt-'): return 'UCRT'
+                      if name == 'webview2loader.dll' or name.startswith('embeddedbrowserwebview'): return 'WEBVIEW2_RUNTIME_OR_LOADER'
+                      if name.startswith(('api-ms-win-','ext-ms-win-')): return 'WINDOWS_API_SET'
+                      if name in names: return 'WINDOWS_SYSTEM'
+                      return 'UNKNOWN'
+                  for row in evidence['imports']+evidence['delayImports']:
+                      row['classification'] = category(row['dll'])
+                  # Reuse helper PE parsing; publish only this product's safe PDB basename.
+                  debug_rva, debug_size = pe.directory(6)
+                  for i, row in enumerate(evidence['debugEntries']):
+                      if row.get('pdbReferencePresent'):
+                          pos = pe.offset(debug_rva+i*28,28)
+                          _,_,_,_,kind,length,_,pointer = pe.unpack('<IIHHIIII',pos)
+                          data = pe.read(pointer,length)
+                          offset = 24 if data[:4]==b'RSDS' else 16
+                          from pathlib import PureWindowsPath
+                          base = PureWindowsPath(data[offset:].split(b'\0',1)[0].decode('utf-8','replace')).name
+                          row['pdbBasename'] = base if re.fullmatch(r'shirushi[_-]desktop\.pdb',base) else 'REDACTED'
+                  evidence['resources']['totalLeafBytes'] = sum(r['size'] for r in evidence['resources']['leaves'])
+              except Exception as error:
+                  emit('DESKTOP_PE_INVENTORY_FAILURE',dict(classification='DESKTOP_PE_INVENTORY_FAILED',failureKind=type(error).__name__))
+                  raise ValueError('DESKTOP_PE_INVENTORY_FAILED') from None
               emit('DESKTOP_RELEASE_BINARY',dict(filename=binary.name,size=len(raw),sha256=sha(raw),pe=evidence,classificationScope='host System32 inventory/API-set contracts; not universal OS availability; unknown remains unknown'))
               # Locked dependency source evidence, not a claim of complete dynamic closure.
               package = next(p for p in tomllib.loads((root/'desktop/Cargo.lock').read_text())['package'] if p['name']=='webview2-com-sys')
@@ -885,11 +926,18 @@ jobs:
               webview_status = 'WEBVIEW2_DIRECT_IMPORT' if static_webview else 'WEBVIEW2_DYNAMIC_RUNTIME_PREREQUISITE' if loader and webview and creates_environment else 'WEBVIEW2_STATUS_UNPROVEN'
               vc = sorted({r['dll'] for r in evidence['imports']+evidence['delayImports'] if r['classification']=='VC_RUNTIME'})
               comparison = 'SAME_VC_RUNTIME_FAMILY' if vc and all(r.startswith('vcruntime140') for r in vc) else 'DIFFERENT_RUNTIME_REQUIREMENTS' if vc else 'INSUFFICIENT_EVIDENCE'
+              relationship = 'ADDITIONAL_DESKTOP_RUNTIME_REQUIREMENTS' if loader and webview and creates_environment else comparison
+              ucrt = sorted({r['dll'] for r in evidence['imports']+evidence['delayImports'] if r['classification']=='UCRT'})
+              unknown = sorted({r['dll'] for r in evidence['imports']+evidence['delayImports'] if r['classification']=='UNKNOWN'})
+              emit('DESKTOP_RUNTIME_REQUIREMENTS',dict(vcRuntimeStatus='DESKTOP_VC_RUNTIME_REQUIRED' if vc else 'DESKTOP_VC_RUNTIME_NOT_DIRECTLY_IMPORTED',vcRuntimeImports=vc,ucrtImports=ucrt,ucrtStatus='UCRT_IMPORTS_OBSERVED' if ucrt else 'UCRT_NOT_DIRECTLY_IMPORTED',otherNonSystemImports=[],unknownImports=unknown,completeRuntimeClosure='UNPROVEN'))
               emit('DESKTOP_DYNAMIC_LOAD_SOURCE',dict(webview2SysVersion=package['version'],webview2SourceSha256=sha(sources[0].read_bytes()),wryVersion=wry_package['version'],wrySourceSha256=sha(wry_sources[0].read_bytes()),wryCreatesWebview2Environment=creates_environment,msvcStaticLoaderDeclaration=loader,applicationCreatesWebview=webview,loaderIsNotRuntime=True,directWebviewImport=static_webview,delayWebviewImport=delay_webview,webview2Status=webview_status,completeRuntimeClosure='UNPROVEN',runtimeLaunch='NOT_RUN'))
-              emit('DESKTOP_HELPER_COMPARISON',dict(helperAcceptedEvidence='CI36854166551; vcruntime140.dll and UCRT; bounded sample no other non-system modules',desktopVcImports=vc,vcFamily=comparison,additionalRuntimeRequirements=['WebView2 Runtime'],sharedDeliverySolved=False,completeRuntimeClosure='UNPROVEN'))
+              emit('DESKTOP_HELPER_COMPARISON',dict(helperAcceptedEvidence='CI36854166551; vcruntime140.dll and UCRT; bounded sample no other non-system modules',desktopVcImports=vc,vcFamily=comparison,relationship=relationship,additionalRuntimeRequirements=['WebView2 Runtime'] if loader and webview and creates_environment else [],sharedDeliverySolved=False,completeRuntimeClosure='UNPROVEN'))
               if not loader or not webview or not creates_environment: raise ValueError('WEBVIEW2_SOURCE_CONTRACT_MISMATCH')
+              gate = 'DESKTOP_RELEASE_NATIVE_INVENTORY_PASS' if linker_identity['classification']=='MSVC_LINKER_IDENTITY_ESTABLISHED' else 'DESKTOP_RELEASE_NATIVE_INVENTORY_PARTIAL_LINKER_IDENTITY_UNPROVEN'
+              emit('DESKTOP_NATIVE_INVENTORY_RESULT',dict(classification=gate,peInventory='COMPLETED',linkerIdentity=linker_identity['classification']))
               with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as summary:
-                  summary.write('Desktop default release build/PE: PASS\nDesktop size: '+str(len(raw))+'\nDesktop SHA-256: '+sha(raw)+'\nWebView2: '+webview_status+'\nVC runtime imports: '+', '.join(vc)+'\nHelper comparison: '+comparison+'; additional WebView2 prerequisite\n')
+                  summary.write('Desktop default release build/PE: PASS\nGate: '+gate+'\nLinker identity: '+linker_identity['classification']+'\nDesktop size: '+str(len(raw))+'\nDesktop SHA-256: '+sha(raw)+'\nWebView2: '+webview_status+'\nVC runtime imports: '+', '.join(vc)+'\nHelper comparison: '+relationship+'; VC family: '+comparison+'\n')
+              if gate!='DESKTOP_RELEASE_NATIVE_INVENTORY_PASS': raise ValueError(gate)
           try: main()
           except Exception as error:
               code = str(error) if isinstance(error,ValueError) and re.fullmatch('[A-Z0-9_]+',str(error)) else type(error).__name__
