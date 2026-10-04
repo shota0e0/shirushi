@@ -593,6 +593,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'VC_DEPLOYMENT_FLOOR_COMPATIBILITY_UNPROVEN' }
 
       - name: Final immutable-input/index checks and bounded native summary
+        id: limited_final
         if: always()
         shell: pwsh
         run: |
@@ -622,9 +623,23 @@ jobs:
             'V02_DEVELOPMENT_PACKAGE_RUNTIME_BINDING_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; executable-relative binding test: ${{ steps.limited_binding.outcome }}; installer assembly NOT RUN', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
-            'ARTIFACT_UPLOAD_COUNT: 0'
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; executable-relative binding test: ${{ steps.limited_binding.outcome }}; installer assembly NOT RUN', 'Development package artifact: subsequent success-only upload step; exactly Desktop/helper/manifest, 3-day retention; no PDB/log/other JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            'DEVELOPMENT_PACKAGE_ARTIFACT: upload stage follows final validation; no upload claimed before it runs'
           }
+
+      - name: Retain verified development package for Owner-local smoke
+        if: ${{ success() && steps.limited_final.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository pin
+        with:
+          name: shirushi-v02-development-package-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/v02-development-assembly-evidence/package-a/shirushi-desktop.exe
+            ${{ runner.temp }}/v02-development-assembly-evidence/package-a/shirushi-inspection-helper.exe
+            ${{ runner.temp }}/v02-development-assembly-evidence/package-a/inspection-helper.manifest.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+          include-hidden-files: false
 
   sdk_parity:
     if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only || inputs.desktop_helper_msrv_diagnostic || inputs.desktop_release_native_inventory_canary))
