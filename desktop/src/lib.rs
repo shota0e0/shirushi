@@ -4,13 +4,14 @@ compile_error!("the manual-canary feature is DEVELOPMENT CANARY only and must no
 #[cfg(test)]
 mod asset_stage;
 mod host;
-// Parallel host-owned inspection boundary; not exposed as a Tauri command.
+// Host-owned inspection boundary; development command reuses this supervisor.
 pub mod inspection_protocol;
 pub mod inspection_supervisor;
-// CI-only package identity Canary. No Production discovery or Tauri command.
+// Development/CI package identity Canary. No Production helper discovery.
 #[cfg(all(windows, debug_assertions))]
 pub mod inspection_package;
 mod protocol;
+pub mod limited_inspection;
 
 use host::BridgeHost;
 use protocol::{BridgeError, GET_CAPABILITIES, LOAD_PERSONAL_MARK};
@@ -71,6 +72,19 @@ async fn bridge_load_personal_mark(state: tauri::State<'_, BridgeRuntime>) -> Re
         .map_err(|_| BridgeError::new("BRIDGE_TASK_FAILED", "native bridge task did not complete"))?
 }
 
+#[tauri::command]
+async fn bridge_inspect_limited(
+    state: tauri::State<'_, limited_inspection::LimitedInspectionRuntime>,
+    request: limited_inspection::InspectionRequest,
+) -> Result<Value, BridgeError> {
+    // Reserve before spawning; a dropped IPC future does not release the gate
+    // while its blocking worker is still running or cleaning up the child.
+    let invocation = state.reserve(request)?;
+    tauri::async_runtime::spawn_blocking(move || invocation.run())
+        .await
+        .map_err(|_| BridgeError::new("INSPECTION_TASK_FAILED", "inspection task did not complete"))
+}
+
 pub fn run() {
     let webview_data_directory = match host::prepare_process_environment() {
         Ok(path) => path,
@@ -85,6 +99,7 @@ pub fn run() {
     let runtime = BridgeRuntime::start();
     tauri::Builder::default()
         .manage(runtime)
+        .manage(limited_inspection::LimitedInspectionRuntime::default())
         .setup(move |app| {
             let window = WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()));
             #[cfg(feature = "manual-canary")]
@@ -109,13 +124,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bridge_get_capabilities,
-            bridge_load_personal_mark
+            bridge_load_personal_mark,
+            bridge_inspect_limited
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Shirushi desktop canary")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 app.state::<BridgeRuntime>().shutdown();
+                app.state::<limited_inspection::LimitedInspectionRuntime>().shutdown();
             }
         });
 }

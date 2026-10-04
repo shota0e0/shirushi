@@ -29,6 +29,10 @@ on:
         description: CI-only Desktop default release static PE/native inventory; no launch or artifacts
         type: boolean
         default: false
+      limited_inspection_native_validation:
+        description: Temporary-branch Rust 1.88 development Limited Inspection native tests; artifact upload 0
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,6 +42,235 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  limited_inspection_native_validation:
+    name: LIMITED_INSPECTION_NATIVE_VALIDATION
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/limited-inspection-native-validation' && inputs.limited_inspection_native_validation
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0-x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: ${{ runner.temp }}/limited-inspection-native-target
+    steps:
+      - name: Check out exact temporary validation commit without EOL conversion
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+          GIT_CONFIG_KEY_1: core.eol
+          GIT_CONFIG_VALUE_1: lf
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Assert exclusive mode, canonical inputs and initial index
+        id: limited_preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $other = @('${{ inputs.real_helper_fixed_path_canary }}', '${{ inputs.release_helper_native_inventory_canary }}', '${{ inputs.desktop_lock_byte_identity_only }}', '${{ inputs.desktop_helper_msrv_diagnostic }}', '${{ inputs.desktop_release_native_inventory_canary }}')
+          if (@($other | Where-Object { $_ -eq 'true' }).Count) { throw 'CONFLICTING_VALIDATION_MODES' }
+          if ($env:GITHUB_REF -ne 'refs/heads/codex/limited-inspection-native-validation') { throw 'VALIDATION_BRANCH_MISMATCH' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'SOURCE_HEAD_MISMATCH' }
+          $index = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'INDEX_PATH_UNAVAILABLE' }
+          $indexSha = (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant()
+          "LIMITED_NATIVE_INDEX_SHA=$indexSha" >> $env:GITHUB_ENV
+          "index_sha=$indexSha" >> $env:GITHUB_OUTPUT
+          $locks = @{
+            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+          }
+          foreach ($path in $locks.Keys) {
+            $oid = (git rev-parse "HEAD:$path").Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'LOCK_BLOB_UNAVAILABLE' }
+            $start = [Diagnostics.ProcessStartInfo]::new('git')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('cat-file'); $start.ArgumentList.Add('blob'); $start.ArgumentList.Add($oid)
+            $p = [Diagnostics.Process]::Start($start)
+            $memory = [IO.MemoryStream]::new()
+            try {
+              $p.StandardOutput.BaseStream.CopyTo($memory); $p.WaitForExit()
+              if ($p.ExitCode -ne 0) { throw 'RAW_LOCK_READ_FAILED' }
+              $raw = $memory.ToArray()
+            } finally { $memory.Dispose(); $p.Dispose() }
+            $working = [IO.File]::ReadAllBytes((Join-Path $PWD $path))
+            $rawSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($raw)).ToLowerInvariant()
+            if ($rawSha -ne $locks[$path] -or -not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw, $working)) { throw 'CANONICAL_LOCK_BYTE_MISMATCH' }
+            "LOCK_EVIDENCE: initial path=$path sha256=$rawSha raw_bytes_equal=true"
+          }
+          $fixture = Get-Item -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png'
+          if ($fixture.Length -ne 319495 -or (Get-FileHash -LiteralPath $fixture.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FIXTURE_CHANGED' }
+          if ((Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant() -ne $indexSha) { throw 'INDEX_CHANGED' }
+          'SOURCE_HEAD_MATCH: true'; "INITIAL_INDEX_SHA256: $indexSha"; 'ARTIFACT_UPLOAD_COUNT: 0'
+
+      - name: Install existing regression-test Python only
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.12.10
+
+      - name: Assert Rust 1.88 and fetch frozen dependencies
+        id: limited_fetch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($name in @('ICU4X_DATA_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','CL','_CL_','LINK','_LINK_')) {
+            if (Test-Path "Env:$name") { throw 'UNAPPROVED_BUILD_OVERRIDE' }
+          }
+          if (@(Get-ChildItem Env: | Where-Object { $_.Name -like 'CARGO_PROFILE_*' -or $_.Name -like 'CARGO_TARGET_*_LINKER' -or $_.Name -like 'CARGO_TARGET_*_RUSTFLAGS' }).Count) { throw 'UNAPPROVED_BUILD_OVERRIDE' }
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rust = cargo +1.88.0 --version
+          if ($LASTEXITCODE -ne 0 -or -not $rust.StartsWith('cargo 1.88.0 ')) { throw 'CARGO_VERSION_MISMATCH' }
+          $compiler = rustc +1.88.0 --version
+          if ($LASTEXITCODE -ne 0 -or -not $compiler.StartsWith('rustc 1.88.0 ')) { throw 'RUST_VERSION_MISMATCH' }
+          "RUST: $compiler"; "CARGO: $rust"; 'TARGET: x86_64-pc-windows-msvc; PROFILE: default debug'
+          cargo +1.88.0 fetch --locked --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.88.0 fetch --locked --manifest-path desktop/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $locks = @{
+            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+          }
+          foreach ($path in $locks.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $locks[$path]) { throw 'POST_FETCH_LOCK_CHANGED' }
+          }
+          $index = (git rev-parse --git-path index).Trim()
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:LIMITED_NATIVE_INDEX_SHA) { throw 'POST_FETCH_INDEX_CHANGED' }
+          python -I -B -m venv --without-pip .venv-py312
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'LOCK_INDEX_EVIDENCE: after-fetch unchanged; Python only for existing BridgeHost regression fixtures, never inspection fallback'
+
+      - name: Assert SDK footprint and build/test Rust helper
+        id: limited_helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $raw = cargo +1.88.0 metadata --locked --offline --format-version 1 --filter-platform x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadata = $raw | ConvertFrom-Json
+          $sdk = @($metadata.packages | Where-Object name -EQ 'c2pa')
+          if ($sdk.Count -ne 1 -or $sdk[0].version -ne '0.85.0') { throw 'SDK_VERSION_MISMATCH' }
+          $features = @(($metadata.resolve.nodes | Where-Object id -EQ $sdk[0].id).features)
+          if ($features.Count -ne 1 -or $features[0] -ne 'rust_native_crypto') { throw 'SDK_FEATURE_MISMATCH' }
+          $tree = @(cargo +1.88.0 tree --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --prefix none --format '{p}' --no-dedupe | Sort-Object -Unique)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $active = @($metadata.packages | Where-Object { $tree -Match ('^'+[regex]::Escape($_.name+' v'+$_.version)+'(?: |$)') })
+          $scripts = @($active | Where-Object { @($_.targets | Where-Object kind -Contains 'custom-build').Count })
+          if ($tree.Count -ne 240 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'HELPER_FOOTPRINT_MISMATCH' }
+          if (@($active | Where-Object name -Match '^(reqwest|ureq|wstd|openssl|openssl-sys|ring|aws-lc-sys|cc|sha2-asm)$').Count) { throw 'UNAPPROVED_RUNTIME_BACKEND' }
+          'HELPER_FEATURES: c2pa0.85.0; rust_native_crypto only; packages240/build scripts26'
+          cargo +1.88.0 build --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --bin shirushi-inspection-helper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Freeze exact development helper input before Desktop compilation
+        id: limited_input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/debug/shirushi-inspection-helper.exe'
+          $file = Get-Item -LiteralPath $helper
+          if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'HELPER_NOT_REGULAR' }
+          $size = $file.Length
+          $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          $trusted = Join-Path '${{ runner.temp }}' 'limited-native-trusted-input'
+          $root = Join-Path '${{ runner.temp }}' 'limited-native-dev-helper'
+          New-Item -ItemType Directory -Path $trusted -ErrorAction Stop | Out-Null
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $manifest = Join-Path $trusted 'inspection-helper.manifest.json'
+          $value = [ordered]@{schemaVersion=1; relativePath='shirushi-inspection-helper.exe'; size=$size; sha256=$sha; protocolVersion=1} | ConvertTo-Json -Compress
+          [IO.File]::WriteAllText($manifest, $value, [Text.UTF8Encoding]::new($false))
+          $digest = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          # Trusted manifest/digest are frozen OUTSIDE the tested helper root.
+          # Ephemeral native test input only, not Shirushi package assembly.
+          Copy-Item -LiteralPath $helper -Destination (Join-Path $root 'shirushi-inspection-helper.exe') -ErrorAction Stop
+          Copy-Item -LiteralPath $manifest -Destination (Join-Path $root 'inspection-helper.manifest.json') -ErrorAction Stop
+          if ((Get-Item -LiteralPath (Join-Path $root 'shirushi-inspection-helper.exe')).Length -ne $size -or (Get-FileHash -LiteralPath (Join-Path $root 'shirushi-inspection-helper.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) { throw 'DEV_HELPER_COPY_CHANGED' }
+          if ((Get-FileHash -LiteralPath (Join-Path $root 'inspection-helper.manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) { throw 'DEV_MANIFEST_COPY_CHANGED' }
+          "SHIRUSHI_DEV_INSPECTION_ROOT=$root" >> $env:GITHUB_ENV
+          "SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_TRUSTED_MANIFEST=$manifest" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_BUILT_HELPER=$helper" >> $env:GITHUB_ENV
+          "SHIRUSHI_CANARY_HELPER_SHA256=$sha" >> $env:GITHUB_ENV
+          "HELPER_INPUT: size=$size sha256=$sha manifest_sha256=$digest; compile-time trusted inputs only"
+
+      - name: Build Desktop and run default library/supervisor regressions
+        id: limited_desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo +1.88.0 build --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --bin shirushi-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --lib -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test inspection_supervisor -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --features manual-canary --test inspection_supervisor -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run accepted helper identity and new application-dispatch native tests
+        id: limited_real
+        shell: pwsh
+        env:
+          RUSTFLAGS: --cfg shirushi_real_helper_canary --cfg shirushi_dev_limited_inspection_canary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test real_inspection_helper -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Join-Path '${{ runner.temp }}' 'limited-native-test-control.log'
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test limited_inspection -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $nativeExit = $LASTEXITCODE
+          if ($nativeExit -ne 0) { exit $nativeExit }
+          # Explicitly reject cfg-gated zero-test success. Runner-local log only;
+          # no upload/transport, no application launch or package production.
+          if ((Get-Item -LiteralPath $log).Length -gt 2097152) { throw 'LIMITED_TEST_CONTROL_TOO_LARGE' }
+          $control = [IO.File]::ReadAllText($log)
+          if ($control -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;' -or $control -notmatch 'application_dispatch_fixture_success_cleanup_and_sequential_repetition' -or $control -notmatch 'application_dispatch_failure_then_success_preserves_source') { throw 'LIMITED_NATIVE_TESTS_NOT_EXECUTED' }
+          'LIMITED_NATIVE_APPLICATION_TESTS: 2 passed; fixed fixture success and failure-then-success; exact cfg active'
+
+      - name: Final immutable-input/index checks and bounded native summary
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            $head = git rev-parse HEAD
+            if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'FINAL_SOURCE_HEAD_CHANGED' }
+            $locks = @{
+              'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
+              'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+            }
+            foreach ($path in $locks.Keys) {
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $locks[$path]) { throw 'FINAL_LOCK_CHANGED' }
+              "LOCK_EVIDENCE: final path=$path exact_sha256=true"
+            }
+            $fixture = Get-Item -LiteralPath 'tests/fixtures/inspection/valid_shirushi.png'
+            if ($fixture.Length -ne 319495 -or (Get-FileHash -LiteralPath $fixture.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne '558c4044228761f91ad1ee1a4637bdd868c65f0e9954e7de928a1262e3076316') { throw 'FINAL_FIXTURE_CHANGED' }
+            $index = (git rev-parse --git-path index).Trim()
+            $before = '${{ steps.limited_preflight.outputs.index_sha }}'
+            if ($LASTEXITCODE -ne 0 -or $before -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant() -ne $before) { throw 'FINAL_INDEX_CHANGED_OR_BASELINE_MISSING' }
+            'LOCK_FIXTURE_INDEX_PRESERVATION: PASS'
+            $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}')
+            if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'LIMITED_INSPECTION_NATIVE_CI_PRECEDING_STEP_FAILED' }
+            'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
+            'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
+          } finally {
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'WORKER_TERMINATION_WAIT_REQUIRED: OPEN; not changed in this validation slice', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python used only by existing BridgeHost regression fixtures; no inspection fallback', 'Package/installer assembly: NOT RUN; ephemeral helper test input only', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            'ARTIFACT_UPLOAD_COUNT: 0'
+          }
+
   sdk_parity:
     if: github.ref == 'refs/heads/codex/f3a-rust-sdk-parity' && !(github.event_name == 'workflow_dispatch' && (inputs.real_helper_fixed_path_canary || inputs.release_helper_native_inventory_canary || inputs.desktop_lock_byte_identity_only || inputs.desktop_helper_msrv_diagnostic || inputs.desktop_release_native_inventory_canary))
     runs-on: windows-2025
