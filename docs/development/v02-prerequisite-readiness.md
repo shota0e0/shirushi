@@ -6,9 +6,11 @@ or approval mechanism. The accepted development runtime-binding checkpoint is
 `cf25049057ab81b35126c46c87502c37cd44b169`, validated by native CI `37180157563`
 at validation commit `961d0ebb12527831bcd6de1a27c27a22a027e339`.
 
-The only new files are the tool, its tests and this document. Existing Desktop
-IPC, helper protocol, package binding, Tauri configuration, workflows, notices
-and `CURRENT_HANDOFF` are unchanged. Parent-controlled independent review and
+The deployment-floor Gate updates only this tool, its tests and this document.
+Desktop IPC, helper protocol, package binding, Tauri configuration, notices,
+the feature workflow and `CURRENT_HANDOFF` are unchanged. One isolated validation
+workflow evidence step supplied the fresh toolset evidence below.
+Parent-controlled independent review and
 verification determine the Gate result; this document does not self-approve it.
 
 ## Two independent branches
@@ -50,13 +52,68 @@ numeric version fields must be complete and agree with the Version string when
 present. Missing Installed is retained as unknown and cannot establish readiness
 under a configured policy. No claim of binary/module-load closure follows.
 
-The shipped immutable `BUILD_POLICY.vc_minimum` is **None**. No approved minimum
-or VC redistributable input exists. Normalized VC evidence therefore produces
-`POLICY_UNSET` (or `DETECTION_FAILED` for malformed/unreadable evidence), never
-READY. Synthetic tests pass an explicit `Policy` to pure functions; that is not
-an Owner-approved product minimum. Result validation requires its policy to
-equal an independently supplied trusted policy, defaulting to the shipped None.
-An observed version or report field cannot grant itself policy authority.
+The shipped immutable `BUILD_POLICY.vc_deployment_floor` is **14.51.36247.0**,
+with required VC architecture **x64**. This is the Owner-approved conservative
+**Shirushi deployment readiness floor**, not an exact theoretical build minimum.
+`BUILD_COMPATIBILITY_MINIMUM = UNPROVEN`; that separate investigation is PARKED.
+A valid installed x64 registration at or above the floor yields VC READY;
+below it yields OUTDATED; missing yields MISSING. Malformed, failed, ambiguous
+or wrong/unknown architecture evidence remains DETECTION_FAILED. Versions are
+compared as four numeric components, never lexicographically.
+
+Explicit `Policy()` still represents no trusted floor and retains POLICY_UNSET.
+Synthetic tests may supply other immutable policies to pure functions; they do
+not approve a product policy. Result validation requires its policy to equal
+the independently supplied trusted policy, defaulting to the shipped floor.
+Neither an observation/report nor CLI/environment input can authorize a floor.
+
+### Deployment-floor evidence and its limits
+
+Fresh CI [37190558305](https://github.com/shota0e0/shirushi/actions/runs/37190558305),
+attempt 1, succeeded at validation commit
+`7b2b91debcea42103689f9ba747cfee545bae5d8`. After the existing native regressions
+and package-binding proof, the single bounded evidence step performed two
+**NEW_DIAGNOSTIC_RELINK** builds using Rust 1.88.0, the frozen dependency graph,
+the same native product source, and `--print=link-args`. It did not execute
+Desktop or an installer. Before/after diagnostic binary hashes and source/run
+identities were recorded separately from the earlier copied package bytes.
+This is not historical binary equivalence, replacement of previous evidence,
+or consumer clean-machine validation.
+
+The actual Rust linker invocation selected `VC/Tools/MSVC/14.51.36231` for both
+Desktop and helper. Both diagnostic binaries were directly PE machine `0x8664`.
+Rooted VCTools/VCRedist default metadata also reported `14.51.36231`; environment
+VCTools values were unset, not inferred. Optional metadata is corroboration,
+never a fallback selector. Passive `link.exe` FileVersion/ProductVersion was
+`14.51.36260.0`, a separate component version, not the selected toolset version
+and not the sole compatibility authority. No `cl.exe` participation is claimed.
+
+Numeric toolset prefix `(14, 51, 36231)` is strictly below floor prefix
+`(14, 51, 36247)`, so an unknown toolset revision cannot reverse this comparison.
+An equal prefix with unproven revision would remain unproven, not receive an
+invented `.0`. Both selected toolsets satisfy the approved conservative floor
+condition; this does not prove the lowest possible runtime requirement or trace
+every resolved import library. The earlier import-library evidence gap remains
+outside this product-floor decision.
+
+`FROZEN_CANDIDATE_SATISFIES_DEPLOYMENT_FLOOR = true` intentionally follows the
+Owner's choice of the frozen candidate version as the product floor. It is not
+`MINIMUM_BUILD_REQUIREMENT_PROVEN`. The independent frozen candidate record
+still describes `vc_redist.x64.exe`, size `18731856`, SHA-256
+`843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c`,
+version `14.51.36247.0`, state **CANDIDATE**, execution count **0**. Its historical
+compatibility/minimum fields are unchanged. Floor closure does not promote,
+install, repair, approve redistribution, or revalidate its signature. The
+readiness tool's VC offline-input branch remains UNCONFIGURED; the separate
+offline candidate validator retains its existing authority boundary.
+
+Microsoft's [supported VC redistributable guidance](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+requires the installed Redistributable to be at least as recent as the Build
+Tools used, with matching application architecture. For mixed components,
+[Microsoft's compatibility rule](https://learn.microsoft.com/en-us/cpp/porting/binary-compat-2015-2017?view=msvc-170)
+requires at least the latest Build Tools used by any component. These rules are
+not weakened to “major 14 is enough”; future toolset changes require review of
+the independently frozen floor rather than an automatic latest lookup.
 
 WebView2 queries only the stable Evergreen GUID
 `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` and `pv` (`REG_SZ`):
@@ -89,7 +146,7 @@ Official references, reviewed for this Gate:
 - [Microsoft VC redistribution and registration/version evidence](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170).
 - [Microsoft WebView2 distribution and stable Runtime detection](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution).
 
-## Strict report schema version 1
+## Strict report schema version 2
 
 No unknown/missing fields, duplicate JSON keys, non-finite numbers, BOM,
 trailing object, bool-as-int versions/sizes or oversized report are accepted.
@@ -97,8 +154,8 @@ The maximum raw report is 16,384 bytes. Nested keys are closed as well.
 
 | Object | Exact fields / conditions |
 | --- | --- |
-| Root | `schemaVersion` integer 1; `purpose` = `READ_ONLY_DEVELOPMENT_READINESS`; `policy`, `overall`, `runtimes`, `offlineInputs` |
-| policy | `vcMinimumVersion`: null in the shipped policy, otherwise independently trusted canonical four-part version |
+| Root | `schemaVersion` integer 2; `purpose` = `READ_ONLY_DEVELOPMENT_READINESS`; `policy`, `overall`, `runtimes`, `offlineInputs` |
+| policy | Exactly `vcDeploymentFloorVersion` (shipped `14.51.36247.0`, null for explicit unset policy), `vcRequiredArchitecture` (`x64`), `buildCompatibilityMinimum` (`UNPROVEN`) |
 | runtimes | Exactly `vc`, `webview2` |
 | Each runtime | `status`, `reason`, `observations` |
 | Each observation | `source`, `query`, `version`, `installed`, `architecture`, `issue` |
@@ -114,7 +171,8 @@ OK versions are canonical four unsigned decimal parts, each 0..65535, without
 leading zeros, and not all zero. VC's observed lowercase `v` prefix and decimal
 component zero padding (for example `v14.44.35211.00` → `14.44.35211.0`) are
 normalized before comparing numeric DWORD fields. Trusted policy/result versions
-remain canonical; this does not relax WebView2 syntax or approve a minimum.
+remain canonical; this does not relax WebView2 syntax or prove a build minimum.
+Schema 1 and the old `vcMinimumVersion` key are rejected, not silently reinterpreted.
 `installed` is boolean or null, never numeric.
 Architecture is `X64_REGISTERED`, `X64_VERIFIED`, `UNPROVEN` or
 `WRONG_ARCHITECTURE`; live WebView2 never emits X64_VERIFIED.
@@ -126,10 +184,10 @@ paths and environment dumps are not published.
 
 Per-runtime states are closed: `READY`, `MISSING`, `OUTDATED`, `POLICY_UNSET`,
 `DETECTION_FAILED`. Reasons are derived, not caller-authorizing flags:
-`OBSERVATION_FAILED`, `VC_MINIMUM_UNAPPROVED`, `REGISTRATION_MISSING`,
+`OBSERVATION_FAILED`, `VC_DEPLOYMENT_FLOOR_UNAPPROVED`, `REGISTRATION_MISSING`,
 `SOURCE_VERSION_CONFLICT`, `X64_READINESS_UNPROVEN`, `INSTALLED_FLAG_UNPROVEN`,
-`SOURCE_INSTALLED_CONFLICT`, `INSTALLED_FLAG_FALSE`, `BELOW_TRUSTED_MINIMUM`,
-`X64_REGISTERED_POLICY_SATISFIED`, `X64_RUNTIME_EVIDENCE_VERIFIED`.
+`SOURCE_INSTALLED_CONFLICT`, `INSTALLED_FLAG_FALSE`, `BELOW_TRUSTED_DEPLOYMENT_FLOOR`,
+`X64_REGISTERED_DEPLOYMENT_FLOOR_SATISFIED`, `X64_RUNTIME_EVIDENCE_VERIFIED`.
 
 `overall` is recomputed independently:
 
@@ -197,14 +255,15 @@ checks. Actual symlink creation may be skipped for lack of privilege; synthetic
 reparse rejection remains tested. Tests do not use the developer's installed
 state as policy proof. No candidate location is implicitly searched.
 
-Native CI is not added. A separately reported non-elevated local read-only
+No runtime integration or new permanent workflow is added. A separately reported non-elevated local read-only
 smoke, if performed, is observation evidence only. No Windows runner/developer
 state defines the supported consumer baseline. Installer execution remains 0.
 
-Next proposed Gate: **VC Runtime Offline Candidate Freeze**. Strong WebView2
-x64/version identity, approved runtime minimums, installer input trust/legal
-review and later install/repair orchestration remain separate Owner-reviewed
-Gates. Do not start them automatically or block Desktop startup here.
+Next proposed Gate: **Prerequisite Install / Repair Orchestration Contract**.
+Do not begin installation or repair automatically. Strong WebView2 x64/version
+identity, candidate promotion, legal distribution approval and consumer
+validation remain separate Owner-reviewed Gates. Exact build compatibility
+minimum remains UNPROVEN / PARKED. This tool does not block Desktop startup.
 
 Production adoption: UNAPPROVED. Production Signing: PARKED.
 Distribution Compliance: NOT READY. Full F3A: NOT READY.

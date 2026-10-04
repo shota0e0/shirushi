@@ -65,17 +65,27 @@ def _version_string(parts: tuple) -> str:
 
 @dataclass(frozen=True)
 class Policy:
-    vc_minimum: str | None = None
+    vc_deployment_floor: str | None = None
 
     def __post_init__(self) -> None:
-        if self.vc_minimum is not None:
-            if _version_string(version(self.vc_minimum)) != self.vc_minimum:
+        if self.vc_deployment_floor is not None:
+            if _version_string(version(self.vc_deployment_floor)) != self.vc_deployment_floor:
                 _fail("POLICY_INVALID")
 
 
-# No approved VC minimum exists. Changing this requires an Owner-reviewed build
-# policy change, not command-line/environment/observed registry input.
-BUILD_POLICY = Policy()
+# Owner-approved conservative deployment policy, not an exact build minimum.
+# Same-job actual Desktop/helper toolsets: CI 37190558305, 14.51.36231.
+# Changing this requires Owner review; observations/CLI/environment cannot do it.
+VC_DEPLOYMENT_FLOOR = "14.51.36247.0"
+VC_REQUIRED_ARCHITECTURE = "x64"
+BUILD_COMPATIBILITY_MINIMUM = "UNPROVEN"
+BUILD_POLICY = Policy(VC_DEPLOYMENT_FLOOR)
+
+
+def _policy_fields(policy: Policy) -> dict:
+    return {"vcDeploymentFloorVersion": policy.vc_deployment_floor,
+            "vcRequiredArchitecture": VC_REQUIRED_ARCHITECTURE,
+            "buildCompatibilityMinimum": BUILD_COMPATIBILITY_MINIMUM}
 
 
 @dataclass(frozen=True)
@@ -174,8 +184,8 @@ def _state(observations: list, *, vc: bool, policy: Policy) -> tuple[str, str]:
     if any(item["query"] in {"FAILED", "MALFORMED"} for item in observations):
         return "DETECTION_FAILED", "OBSERVATION_FAILED"
     present = [item for item in observations if item["query"] == "OK"]
-    if vc and policy.vc_minimum is None:
-        return "POLICY_UNSET", "VC_MINIMUM_UNAPPROVED"
+    if vc and policy.vc_deployment_floor is None:
+        return "POLICY_UNSET", "VC_DEPLOYMENT_FLOOR_UNAPPROVED"
     if not present:
         return "MISSING", "REGISTRATION_MISSING"
     if len({item["version"] for item in present}) != 1:
@@ -188,9 +198,9 @@ def _state(observations: list, *, vc: bool, policy: Policy) -> tuple[str, str]:
         return "DETECTION_FAILED", "SOURCE_INSTALLED_CONFLICT"
     if vc and any(item["installed"] is False for item in present):
         return "MISSING", "INSTALLED_FLAG_FALSE"
-    if vc and version(present[0]["version"]) < version(policy.vc_minimum):
-        return "OUTDATED", "BELOW_TRUSTED_MINIMUM"
-    return "READY", "X64_REGISTERED_POLICY_SATISFIED" if vc else "X64_RUNTIME_EVIDENCE_VERIFIED"
+    if vc and version(present[0]["version"]) < version(policy.vc_deployment_floor):
+        return "OUTDATED", "BELOW_TRUSTED_DEPLOYMENT_FLOOR"
+    return "READY", "X64_REGISTERED_DEPLOYMENT_FLOOR_SATISFIED" if vc else "X64_RUNTIME_EVIDENCE_VERIFIED"
 
 
 def _overall(states: list[str]) -> str:
@@ -218,8 +228,8 @@ def evaluate(registrations: list[Registration], *, policy: Policy = BUILD_POLICY
     for name, items, vc in (("vc", observations[:2], True), ("webview2", observations[2:], False)):
         state, reason = _state(items, vc=vc, policy=policy)
         runtimes[name] = {"status": state, "reason": reason, "observations": items}
-    result = {"schemaVersion": 1, "purpose": "READ_ONLY_DEVELOPMENT_READINESS",
-              "policy": {"vcMinimumVersion": policy.vc_minimum},
+    result = {"schemaVersion": 2, "purpose": "READ_ONLY_DEVELOPMENT_READINESS",
+              "policy": _policy_fields(policy),
               "overall": _overall([item["status"] for item in runtimes.values()]),
               "runtimes": runtimes, "offlineInputs": offline_input if offline_input is not None else _offline()}
     validate_result(result, policy=policy)
@@ -234,10 +244,10 @@ def _keys(value: object, expected: set) -> None:
 def validate_result(value: dict, *, policy: Policy = BUILD_POLICY) -> None:
     """Recompute state; a status/manifest cannot grant itself policy or approval."""
     _keys(value, {"schemaVersion", "purpose", "policy", "overall", "runtimes", "offlineInputs"})
-    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1 or value["purpose"] != "READ_ONLY_DEVELOPMENT_READINESS":
+    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 2 or value["purpose"] != "READ_ONLY_DEVELOPMENT_READINESS":
         _fail("RESULT_SCHEMA_INVALID")
-    _keys(value["policy"], {"vcMinimumVersion"})
-    if value["policy"]["vcMinimumVersion"] != policy.vc_minimum:
+    _keys(value["policy"], {"vcDeploymentFloorVersion", "vcRequiredArchitecture", "buildCompatibilityMinimum"})
+    if value["policy"] != _policy_fields(policy):
         _fail("POLICY_MISMATCH")
     _keys(value["runtimes"], {"vc", "webview2"})
     for name, sources, vc in (("vc", list(VC_SOURCES), True), ("webview2", list(WV_SOURCES), False)):

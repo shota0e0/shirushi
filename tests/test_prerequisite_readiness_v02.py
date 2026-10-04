@@ -62,10 +62,40 @@ class ReadinessTests(unittest.TestCase):
             with self.subTest(observed=observed):
                 self.assert_state(rows(observed), "vc", "MISSING", "PREREQUISITES_REQUIRED")
 
-    def test_default_policy_is_unset_even_with_valid_registration(self):
-        self.assertIsNone(readiness.BUILD_POLICY.vc_minimum)
-        result = self.assert_state(rows(), "vc", "POLICY_UNSET", "READINESS_UNKNOWN", policy=readiness.BUILD_POLICY)
-        self.assertIsNone(result["policy"]["vcMinimumVersion"])
+    def test_explicit_policy_unset_even_with_valid_registration(self):
+        unset = readiness.Policy()
+        self.assertIsNone(unset.vc_deployment_floor)
+        result = self.assert_state(rows(), "vc", "POLICY_UNSET", "READINESS_UNKNOWN", policy=unset)
+        self.assertIsNone(result["policy"]["vcDeploymentFloorVersion"])
+        self.assertEqual(result["runtimes"]["vc"]["reason"], "VC_DEPLOYMENT_FLOOR_UNAPPROVED")
+
+    def test_shipped_floor_exact_and_numerically_newer_runtime_ready(self):
+        self.assertEqual(readiness.BUILD_POLICY.vc_deployment_floor, "14.51.36247.0")
+        for value in ("14.51.36247.0", "14.51.36247.1", "14.51.36248.0", "14.52.0.0", "15.0.0.0"):
+            with self.subTest(value=value):
+                result = self.assert_state(rows(vc(value)), "vc", "READY", "READY", policy=readiness.BUILD_POLICY)
+                self.assertEqual(result["policy"], {"vcDeploymentFloorVersion": "14.51.36247.0", "vcRequiredArchitecture": "x64", "buildCompatibilityMinimum": "UNPROVEN"})
+                self.assertEqual(result["runtimes"]["vc"]["reason"], "X64_REGISTERED_DEPLOYMENT_FLOOR_SATISFIED")
+
+    def test_shipped_floor_numerically_older_and_lexical_traps_outdated(self):
+        for value in ("14.51.36246.65535", "14.50.65535.65535", "14.9.65535.65535", "13.65535.65535.65535"):
+            with self.subTest(value=value):
+                result = self.assert_state(rows(vc(value)), "vc", "OUTDATED", "PREREQUISITES_REQUIRED", policy=readiness.BUILD_POLICY)
+                self.assertEqual(result["runtimes"]["vc"]["reason"], "BELOW_TRUSTED_DEPLOYMENT_FLOOR")
+        revision_floor = readiness.Policy("14.51.36247.10")
+        self.assert_state(rows(vc("14.51.36247.9")), "vc", "OUTDATED", policy=revision_floor)
+        self.assert_state(rows(vc("14.51.36247.11")), "vc", "READY", policy=revision_floor)
+
+    def test_shipped_floor_missing_failed_malformed_architecture_and_conflicting_views(self):
+        missing = readiness.Registration(readiness.VC_SOURCE, "MISSING", {})
+        self.assert_state(rows(missing), "vc", "MISSING", "PREREQUISITES_REQUIRED", policy=readiness.BUILD_POLICY)
+        cases = (readiness.Registration(readiness.VC_SOURCE, "FAILED", {}), vc("not-a-version"),
+                 vc("14.51.36247.0", architecture="WRONG_ARCHITECTURE"), vc("14.51.36247.0", architecture="UNPROVEN"))
+        for observed in cases:
+            self.assert_state(rows(observed), "vc", "DETECTION_FAILED", "READINESS_UNKNOWN", policy=readiness.BUILD_POLICY)
+        conflict = rows(vc("14.51.36247.0"))
+        conflict[1] = vc("14.51.36248.0", source=readiness.VC_SOURCES[1])
+        self.assert_state(conflict, "vc", "DETECTION_FAILED", "READINESS_UNKNOWN", policy=readiness.BUILD_POLICY)
 
     def test_vc_malformed_versions(self):
         for value in (None, "", "0.0.0.0", "v14.1", "14.0.0.0 extra", "14..0.0", "65536.0.0.0", True):
@@ -160,7 +190,7 @@ class ReadinessTests(unittest.TestCase):
             self.assert_state(values, "webview2", "DETECTION_FAILED", "READINESS_UNKNOWN")
 
     def test_unknown_has_precedence_over_missing(self):
-        self.assert_state(rows(wv_row=wv(None)), "vc", "POLICY_UNSET", "READINESS_UNKNOWN", policy=readiness.BUILD_POLICY)
+        self.assert_state(rows(wv_row=wv(None)), "vc", "POLICY_UNSET", "READINESS_UNKNOWN", policy=readiness.Policy())
 
     def test_strict_observation_set_no_duplicates_or_preview_sources(self):
         for values in (rows()[:3], rows() + [wv()], [rows()[1], *rows()[1:]]):
@@ -172,7 +202,7 @@ class ReadinessTests(unittest.TestCase):
     def test_strict_json_unknown_missing_wrong_types_and_false_ready(self):
         baseline = readiness.evaluate(rows())
         mutations = [lambda r: r.update(extra=1), lambda r: r.pop("purpose"),
-                     lambda r: r.update(schemaVersion=True), lambda r: r.update(schemaVersion=1.0),
+                     lambda r: r.update(schemaVersion=True), lambda r: r.update(schemaVersion=2.0),
                      lambda r: r.update(overall="READY"),
                      lambda r: r["runtimes"]["vc"].update(status="READY"),
                      lambda r: r["runtimes"]["vc"]["observations"][0].update(installed=1),
@@ -193,25 +223,59 @@ class ReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(readiness.ReadinessError, "POLICY_MISMATCH"):
             readiness.parse_result(encoded(forged))
 
+    def test_schema_one_old_minimum_and_policy_authority_tamper_rejected(self):
+        baseline = readiness.evaluate(rows(vc("14.51.36247.0")))
+        mutations = (lambda r: r.update(schemaVersion=1),
+                     lambda r: r.update(policy={"vcMinimumVersion": "14.51.36247.0"}),
+                     lambda r: r["policy"].update(vcMinimumVersion="14.51.36247.0"),
+                     lambda r: r["policy"].update(vcRequiredArchitecture="x86"),
+                     lambda r: r["policy"].update(buildCompatibilityMinimum="14.51.36247.0"),
+                     lambda r: r["policy"].update(vcDeploymentFloorVersion=True))
+        for mutate in mutations:
+            value = copy.deepcopy(baseline); mutate(value)
+            with self.subTest(value=value["policy"]), self.assertRaises(readiness.ReadinessError):
+                readiness.parse_result(encoded(value))
+        unset = readiness.evaluate(rows(), policy=readiness.Policy())
+        with self.assertRaisesRegex(readiness.ReadinessError, "POLICY_MISMATCH"):
+            readiness.parse_result(encoded(unset))
+
+    def test_floor_does_not_prove_minimum_or_approve_frozen_candidate(self):
+        from scripts import verify_vc_runtime_candidate as candidate
+        record_path = Path(__file__).resolve().parents[1] / "docs/development/v02-vc-runtime-offline-candidate.json"
+        record = candidate.parse_record(record_path.read_bytes())
+        self.assertEqual(record["productVersion"], readiness.VC_DEPLOYMENT_FLOOR)
+        self.assertEqual(record["state"], "CANDIDATE")
+        self.assertEqual(record["minimumPolicyClassification"], "VC_MINIMUM_POLICY_UNPROVEN")
+        self.assertIsNone(record["minimumRuntimeVersion"])
+        self.assertEqual(record["executionCount"], 0)
+        self.assertEqual(readiness.BUILD_COMPATIBILITY_MINIMUM, "UNPROVEN")
+        self.assertEqual(readiness.evaluate(rows())["offlineInputs"]["vc"], {"status": "VC_OFFLINE_INPUT_UNCONFIGURED"})
+
+    def test_environment_cannot_change_shipped_floor(self):
+        with mock.patch.dict(os.environ, {"SHIRUSHI_VC_RUNTIME_FLOOR": "0.0.0.1", "VC_DEPLOYMENT_FLOOR": "0.0.0.1"}):
+            result = readiness.evaluate(rows())
+        self.assertEqual(result["policy"]["vcDeploymentFloorVersion"], "14.51.36247.0")
+
     def test_strict_json_duplicate_nonfinite_trailing_bom_size(self):
         good = readiness.encode_result(readiness.evaluate(rows()))
-        for raw in (good.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
-                    good.replace(b'"schemaVersion":1', b'"schemaVersion":NaN'),
+        for raw in (good.replace(b'"schemaVersion":2', b'"schemaVersion":2,"schemaVersion":2'),
+                    good.replace(b'"schemaVersion":2', b'"schemaVersion":NaN'),
                     good + b"{}", b"\xef\xbb\xbf" + good, b"x" * (readiness.MAX_RESULT + 1), b"", b"[]"):
             with self.subTest(raw=raw[:30]), self.assertRaises(readiness.ReadinessError):
                 readiness.parse_result(raw)
 
     def test_cli_has_no_minimum_hash_policy_or_source_override(self):
-        for option in ("--vc-minimum", "--expected-sha256", "--policy", "--registry-source"):
+        for option in ("--vc-minimum", "--vc-deployment-floor", "--expected-sha256", "--policy", "--registry-source"):
             with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
                 readiness.main(["observe", option, "value"])
 
-    def test_injected_reader_observer_is_read_only_and_default_policy_unset(self):
+    def test_injected_reader_observer_is_read_only_and_default_floor_applied(self):
         observations = dict(zip((*readiness.VC_SOURCES, *readiness.WV_SOURCES), rows()))
         reader = SimpleNamespace(read=mock.Mock(side_effect=lambda source: observations[source]))
         result = readiness.observe(reader)
         self.assertEqual(reader.read.call_count, 4)
-        self.assertEqual(result["overall"], "READINESS_UNKNOWN")
+        self.assertEqual(result["overall"], "PREREQUISITES_REQUIRED")
+        self.assertEqual(result["runtimes"]["vc"]["status"], "OUTDATED")
         self.assertEqual(result["offlineInputs"]["vc"]["status"], "VC_OFFLINE_INPUT_UNCONFIGURED")
 
     def test_registry_reader_allowlist_views_and_query_types(self):
