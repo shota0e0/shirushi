@@ -2,7 +2,7 @@ name: F3A isolated Rust SDK semantic parity PoC
 
 on:
   push:
-    branches: [codex/f3a-rust-sdk-parity]
+    branches: [codex/f3a-rust-sdk-parity, codex/limited-inspection-native-validation]
     paths:
       - tools/f3a-rust-sdk-parity/**
       - docs/development/f3a-rust-sdk-parity*
@@ -44,12 +44,11 @@ concurrency:
 jobs:
   limited_inspection_native_validation:
     name: LIMITED_INSPECTION_NATIVE_VALIDATION
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/limited-inspection-native-validation' && inputs.limited_inspection_native_validation
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/limited-inspection-native-validation'
     runs-on: windows-2025
     timeout-minutes: 60
     env:
       RUSTUP_TOOLCHAIN: 1.88.0-x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: ${{ runner.temp }}/limited-inspection-native-target
     steps:
       - name: Check out exact temporary validation commit without EOL conversion
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,6 +69,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $other = @('${{ inputs.real_helper_fixed_path_canary }}', '${{ inputs.release_helper_native_inventory_canary }}', '${{ inputs.desktop_lock_byte_identity_only }}', '${{ inputs.desktop_helper_msrv_diagnostic }}', '${{ inputs.desktop_release_native_inventory_canary }}')
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'limited-inspection-native-target')" >> $env:GITHUB_ENV
           if (@($other | Where-Object { $_ -eq 'true' }).Count) { throw 'CONFLICTING_VALIDATION_MODES' }
           if ($env:GITHUB_REF -ne 'refs/heads/codex/limited-inspection-native-validation') { throw 'VALIDATION_BRANCH_MISMATCH' }
           $head = git rev-parse HEAD
