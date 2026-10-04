@@ -242,6 +242,173 @@ jobs:
           if ($control -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;' -or $control -notmatch 'application_dispatch_fixture_success_cleanup_and_sequential_repetition' -or $control -notmatch 'application_dispatch_failure_then_success_preserves_source') { throw 'LIMITED_NATIVE_TESTS_NOT_EXECUTED' }
           'LIMITED_NATIVE_APPLICATION_TESTS: 2 passed; fixed fixture success and failure-then-success; exact cfg active'
 
+      - name: Assemble and independently audit actual same-job development bytes
+        id: limited_package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $frozen = @{
+            'scripts/package_v02_development.py' = '02ea541d88faeb4d500ae2040fc2021ca97ac65ca3bfb4aee53af80c6603cc1d'
+            'tests/test_package_v02_development.py' = '621496a3803c795e3603676f692ec1ed3f97aa58954eb6796873274349e468d0'
+            'docs/development/v02-development-package.md' = 'c234145c4c6829309c8bbfe66eeb57ded144ca81429e926e09d85bc5057bc8b6'
+          }
+          foreach ($path in $frozen.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $frozen[$path]) { throw 'FROZEN_ASSEMBLER_SOURCE_CHANGED' }
+          }
+          & .\.venv-py312\Scripts\python.exe -B -m unittest discover -s tests -p test_package_v02_development.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'DEVELOPMENT_PACKAGE_UNIT_TESTS_FAILED' }
+          @'
+          import ctypes, hashlib, json, os, re, shutil, stat, struct, subprocess, sys
+          from pathlib import Path
+          DESKTOP, HELPER, MANIFEST = 'shirushi-desktop.exe', 'shirushi-inspection-helper.exe', 'inspection-helper.manifest.json'
+          NAMES = {DESKTOP, HELPER, MANIFEST}
+          LIMIT, REPARSE = 268435456, 0x400
+          def require(condition, code):
+              if not condition: raise ValueError(code)
+          def canonical(value):
+              return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+          def emit(marker, value):
+              print(marker + ': ' + canonical(value).decode('ascii'))
+          def failure(kind, error, trace):
+              code = str(error) if isinstance(error, ValueError) and re.fullmatch('[A-Z0-9_]+', str(error)) else kind.__name__
+              emit('DEVELOPMENT_PACKAGE_EVIDENCE_FAILURE', {'code': code})
+          sys.excepthook = failure
+          require(sys.version_info[:3] == (3, 12, 10), 'PYTHON_VERSION_CHANGED')
+          def metadata(path, directory=False):
+              value = path.lstat()
+              require(not stat.S_ISLNK(value.st_mode) and not getattr(value, 'st_file_attributes', 0) & REPARSE, 'REPARSE_PATH')
+              require(stat.S_ISDIR(value.st_mode) if directory else stat.S_ISREG(value.st_mode), 'NOT_REGULAR')
+              require(type(value.st_dev) is int and type(value.st_ino) is int and value.st_ino > 0, 'FILE_IDENTITY_UNAVAILABLE')
+              return value
+          def stamp(value):
+              return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+          def local(path):
+              require(path.is_absolute() and re.fullmatch('[A-Za-z]:', path.drive) is not None, 'NOT_LOCAL_ABSOLUTE')
+              drive = ctypes.WinDLL('kernel32', use_last_error=True).GetDriveTypeW
+              drive.argtypes, drive.restype = [ctypes.c_wchar_p], ctypes.c_uint32
+              require(drive(path.anchor) == 3, 'NOT_FIXED_DRIVE')
+              for ancestor in reversed(path.parents): metadata(ancestor, True)
+          def digest(path, maximum=LIMIT, subsystem=None):
+              local(path); before = metadata(path)
+              require(0 < before.st_size <= maximum, 'INPUT_SIZE_INVALID')
+              sha, count, header = hashlib.sha256(), 0, bytearray()
+              with path.open('rb') as stream:
+                  require(stamp(os.fstat(stream.fileno())) == stamp(before), 'READ_IDENTITY_CHANGED')
+                  while block := stream.read(1048576):
+                      count += len(block); require(count <= before.st_size, 'READ_GREW')
+                      sha.update(block)
+                      if len(header) < 65536: header.extend(block[:65536-len(header)])
+                  require(stamp(os.fstat(stream.fileno())) == stamp(before), 'READ_IDENTITY_CHANGED')
+              local(path); require(stamp(metadata(path)) == stamp(before) and count == before.st_size, 'READ_CHANGED')
+              if subsystem is not None:
+                  require(len(header) >= 64 and header[:2] == b'MZ', 'NATIVE_DOS_INVALID')
+                  pe = struct.unpack_from('<I', header, 60)[0]
+                  require(64 <= pe and pe + 94 <= len(header) and header[pe:pe+4] == b'PE\0\0', 'NATIVE_PE_INVALID')
+                  require(struct.unpack_from('<H', header, pe+4)[0] == 0x8664 and struct.unpack_from('<H', header, pe+24)[0] == 0x20b and struct.unpack_from('<H', header, pe+92)[0] == subsystem, 'NATIVE_TARGET_INVALID')
+              return {'size': count, 'sha256': sha.hexdigest()}
+          def small(path, maximum):
+              local(path); before = metadata(path)
+              require(0 < before.st_size <= maximum, 'EVIDENCE_TOO_LARGE')
+              with path.open('rb') as stream: raw = stream.read(maximum+1)
+              require(len(raw) == before.st_size and stamp(metadata(path)) == stamp(before), 'EVIDENCE_CHANGED')
+              return raw
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  require(key not in value, 'DUPLICATE_JSON_FIELD'); value[key] = item
+              return value
+          def strict(raw):
+              return json.loads(raw.decode('ascii'), object_pairs_hook=unique, parse_constant=lambda value: require(False, 'JSON_CONSTANT_INVALID'))
+          def shown(path):
+              require(path.is_relative_to(runner) and '/users/' not in path.as_posix().lower(), 'PRIVATE_PATH_NOT_PUBLISHABLE')
+              return path.as_posix()
+          root = Path.cwd()
+          runner = Path(os.environ['RUNNER_TEMP'])
+          local(runner); metadata(runner, True)
+          sources = {name: Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/debug'/name for name in (DESKTOP, HELPER)}
+          before = {name: digest(path, subsystem=2 if name == DESKTOP else 3) for name, path in sources.items()}
+          source_stamps = {name: stamp(metadata(path)) for name, path in sources.items()}
+          require(before[HELPER]['sha256'] == os.environ['SHIRUSHI_CANARY_HELPER_SHA256'], 'FROZEN_HELPER_CHANGED')
+          config_raw = small(root/'desktop/tauri.conf.json', 65536)
+          require(json.loads(config_raw)['bundle']['active'] is False, 'BUNDLE_ACTIVE_CHANGED')
+          tools = {'scripts/package_v02_development.py': '02ea541d88faeb4d500ae2040fc2021ca97ac65ca3bfb4aee53af80c6603cc1d', 'tests/test_package_v02_development.py': '621496a3803c795e3603676f692ec1ed3f97aa58954eb6796873274349e468d0', 'docs/development/v02-development-package.md': 'c234145c4c6829309c8bbfe66eeb57ded144ca81429e926e09d85bc5057bc8b6'}
+          def tools_unchanged():
+              for name, expected in tools.items(): require(digest(root/name, 32768)['sha256'] == expected, 'FROZEN_ASSEMBLER_SOURCE_CHANGED')
+          tools_unchanged()
+          emit('REAL_PACKAGE_INPUT', {'target': 'x86_64-pc-windows-msvc', 'profile': 'same-job debug output selected after accepted regressions', 'sourceCommit': os.environ['GITHUB_SHA'], 'files': {name: dict(value, path=shown(sources[name])) for name, value in before.items()}})
+          evidence = runner/'v02-development-assembly-evidence'
+          local(evidence); require(not os.path.lexists(evidence), 'EVIDENCE_ROOT_EXISTS'); evidence.mkdir()
+          manifest_value = {'schemaVersion': 1, 'relativePath': HELPER, 'size': before[HELPER]['size'], 'sha256': before[HELPER]['sha256'], 'protocolVersion': 1}
+          manifest_raw = canonical(manifest_value)
+          expected = dict(before, **{MANIFEST: {'size': len(manifest_raw), 'sha256': hashlib.sha256(manifest_raw).hexdigest()}})
+          expected_record = {'schemaVersion': 1, 'artifactType': 'DEVELOPMENT_PACKAGE', 'target': 'x86_64-pc-windows-msvc', 'runtimeBinding': 'UNPROVEN', 'files': expected}
+          def independent_audit(package, record_path):
+              local(package); metadata(package, True)
+              entries = []
+              with os.scandir(package) as scan:
+                  for entry in scan:
+                      entries.append(entry); require(len(entries) <= 3, 'PACKAGE_INVENTORY_INVALID')
+              require(len(entries) == 3 and {entry.name for entry in entries} == NAMES and len({entry.name.casefold() for entry in entries}) == 3, 'PACKAGE_INVENTORY_INVALID')
+              measured = {name: digest(package/name, 4096 if name == MANIFEST else LIMIT, 2 if name == DESKTOP else 3 if name == HELPER else None) for name in NAMES}
+              require(measured == expected, 'INDEPENDENT_PACKAGE_IDENTITY_MISMATCH')
+              raw = small(package/MANIFEST, 4096); parsed = strict(raw)
+              require(type(parsed) is dict and set(parsed) == set(manifest_value), 'MANIFEST_SCHEMA_INVALID')
+              require(type(parsed['schemaVersion']) is int and type(parsed['protocolVersion']) is int and type(parsed['size']) is int, 'MANIFEST_TYPE_INVALID')
+              require(parsed == manifest_value and raw == canonical(parsed), 'MANIFEST_IDENTITY_OR_ENCODING_INVALID')
+              record_raw = small(record_path, 8192); record = strict(record_raw)
+              require(record == expected_record and record_raw == canonical(expected_record)+b'\n', 'EXTERNAL_RECORD_NOT_EXPECTED')
+              return measured, hashlib.sha256(record_raw).hexdigest()
+          results = []
+          for suffix in ('a', 'b'):
+              package = evidence/('package-'+suffix)
+              stdout, stderr = evidence/('record-'+suffix+'.json'), evidence/('stderr-'+suffix+'.txt')
+              tools_unchanged()
+              with stdout.open('xb') as out, stderr.open('xb') as err:
+                  process = subprocess.run([sys.executable, '-B', str(root/'scripts/package_v02_development.py'), 'assemble', '--desktop', str(sources[DESKTOP]), '--helper', str(sources[HELPER]), '--output-root', str(package)], stdout=out, stderr=err, timeout=120, check=False)
+              require(process.returncode == 0 and metadata(stderr).st_size <= 8192, 'ASSEMBLY_PROCESS_FAILED')
+              measured, record_sha = independent_audit(package, stdout)
+              results.append(measured)
+              emit('REAL_PACKAGE_MANIFEST', {'package': suffix, 'path': shown(package/MANIFEST), 'value': manifest_value, 'sha256': expected[MANIFEST]['sha256']})
+              emit('REAL_PACKAGE_AUDIT', {'package': suffix, 'root': shown(package), 'files': measured, 'recordSha256': record_sha, 'independentExpectedInputs': True, 'runtimeBinding': 'UNPROVEN'})
+          require(results[0] == results[1], 'PACKAGE_REPEATABILITY_FAILED')
+          for name in NAMES:
+              a, b = evidence/'package-a'/name, evidence/'package-b'/name
+              local(a); local(b); first, second = metadata(a), metadata(b)
+              require(first.st_size == second.st_size == expected[name]['size'], 'REPEAT_SIZE_CHANGED')
+              count = 0
+              with a.open('rb') as left, b.open('rb') as right:
+                  while True:
+                      x, y = left.read(1048576), right.read(1048576)
+                      require(x == y, 'REPEAT_BYTES_DIFFER'); count += len(x)
+                      require(count <= first.st_size, 'REPEAT_READ_GREW')
+                      if not x: break
+                  require(stamp(os.fstat(left.fileno())) == stamp(first) and stamp(os.fstat(right.fileno())) == stamp(second), 'REPEAT_FILES_CHANGED')
+              require(count == first.st_size and stamp(metadata(a)) == stamp(first) and stamp(metadata(b)) == stamp(second), 'REPEAT_FILES_CHANGED')
+          emit('PACKAGE_REPEATABILITY', {'classification': 'PASS', 'exactInventorySizeAndSha': True, 'allThreeFileBytesEqual': True, 'canonicalManifestBytesEqual': True})
+          # Only the negative control imports the assembler API. Positive trust
+          # predicates above are independent and derived from canonical inputs.
+          from scripts import package_v02_development as assembler
+          tamper = evidence/'tamper-input'; tamper.mkdir()
+          copy = tamper/HELPER; shutil.copyfile(sources[HELPER], copy)
+          require(digest(copy, subsystem=3) == before[HELPER], 'TAMPER_COPY_IDENTITY_INVALID')
+          frozen = assembler.capture_inputs(sources[DESKTOP], copy)
+          with copy.open('r+b') as stream:
+              stream.seek(-1, os.SEEK_END); byte = stream.read(1); stream.seek(-1, os.SEEK_END)
+              stream.write(bytes([byte[0] ^ 1])); stream.flush(); os.fsync(stream.fileno())
+          rejected = False; negative_output = evidence/'tamper-rejected-package'
+          try: assembler.assemble(sources[DESKTOP], copy, negative_output, snapshot=frozen)
+          except assembler.PackageError as error: rejected = str(error) == 'SOURCE_CHANGED'
+          require(rejected and not os.path.lexists(negative_output), 'REAL_TAMPER_NOT_FAIL_CLOSED')
+          for name, path in sources.items():
+              require(digest(path, subsystem=2 if name == DESKTOP else 3) == before[name] and stamp(metadata(path)) == source_stamps[name], 'CANONICAL_NATIVE_INPUT_CHANGED')
+          emit('REAL_INPUT_TAMPER', {'classification': 'SOURCE_CHANGED_REJECTED', 'outputAbsent': True, 'canonicalHelperUntouched': True})
+          tools_unchanged()
+          require(small(root/'desktop/tauri.conf.json', 65536) == config_raw, 'TAURI_CONFIG_CHANGED')
+          emit('REAL_PACKAGE_ASSEMBLY_CHECKS', {'classification': 'COMPLETED', 'nativePayloadExecution': 'NOT_RUN', 'runtimeBinding': 'UNPROVEN', 'artifactUploadCount': 0})
+          '@ | & .\.venv-py312\Scripts\python.exe -B -
+          if ($LASTEXITCODE -ne 0) { throw 'DEVELOPMENT_PACKAGE_EVIDENCE_FAILED' }
+
       - name: Final immutable-input/index checks and bounded native summary
         if: always()
         shell: pwsh
@@ -265,12 +432,13 @@ jobs:
             $before = '${{ steps.limited_preflight.outputs.index_sha }}'
             if ($LASTEXITCODE -ne 0 -or $before -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant() -ne $before) { throw 'FINAL_INDEX_CHANGED_OR_BASELINE_MISSING' }
             'LOCK_FIXTURE_INDEX_PRESERVATION: PASS'
-            $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}')
+            $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}','${{ steps.limited_package.outcome }}')
             if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'LIMITED_INSPECTION_NATIVE_CI_PRECEDING_STEP_FAILED' }
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
+            'V02_DEVELOPMENT_PACKAGE_ASSEMBLY_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python used only by existing BridgeHost regression fixtures; no inspection fallback', 'Package/installer assembly: NOT RUN; ephemeral helper test input only', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; runtime binding UNPROVEN; installer assembly NOT RUN', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'ARTIFACT_UPLOAD_COUNT: 0'
           }
 
