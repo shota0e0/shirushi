@@ -185,20 +185,24 @@ jobs:
           $size = $file.Length
           $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
           $trusted = Join-Path '${{ runner.temp }}' 'limited-native-trusted-input'
-          $root = Join-Path '${{ runner.temp }}' 'limited-native-dev-helper'
           New-Item -ItemType Directory -Path $trusted -ErrorAction Stop | Out-Null
-          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
           $manifest = Join-Path $trusted 'inspection-helper.manifest.json'
-          $value = [ordered]@{schemaVersion=1; relativePath='shirushi-inspection-helper.exe'; size=$size; sha256=$sha; protocolVersion=1} | ConvertTo-Json -Compress
-          [IO.File]::WriteAllText($manifest, $value, [Text.UTF8Encoding]::new($false))
+          if ((Get-FileHash -LiteralPath 'scripts/package_v02_development.py' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '2b62440b5123f117ead8159331a26853ac365cbf7552231184152302872463f6') { throw 'CANONICAL_GENERATOR_CHANGED' }
+          $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PWD '.venv-py312/Scripts/python.exe'))
+          $start.UseShellExecute = $false
+          $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+          foreach ($arg in @('-B',(Join-Path $PWD 'scripts/package_v02_development.py'),'prepare-manifest','--helper',$helper)) { $start.ArgumentList.Add($arg) }
+          $out = [IO.File]::Open($manifest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+          $p = [Diagnostics.Process]::Start($start)
+          try {
+            $p.StandardOutput.BaseStream.CopyTo($out); $out.Dispose()
+            $diagnostic = $p.StandardError.ReadToEnd(); $p.WaitForExit()
+            if ($p.ExitCode -ne 0 -or (Get-Item -LiteralPath $manifest).Length -lt 1 -or (Get-Item -LiteralPath $manifest).Length -gt 4096 -or $diagnostic.Length -gt 8192) { throw 'CANONICAL_MANIFEST_PREPARATION_FAILED' }
+          } finally { $out.Dispose(); $p.Dispose() }
           $digest = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
-          # Trusted manifest/digest are frozen OUTSIDE the tested helper root.
-          # Ephemeral native test input only, not Shirushi package assembly.
-          Copy-Item -LiteralPath $helper -Destination (Join-Path $root 'shirushi-inspection-helper.exe') -ErrorAction Stop
-          Copy-Item -LiteralPath $manifest -Destination (Join-Path $root 'inspection-helper.manifest.json') -ErrorAction Stop
-          if ((Get-Item -LiteralPath (Join-Path $root 'shirushi-inspection-helper.exe')).Length -ne $size -or (Get-FileHash -LiteralPath (Join-Path $root 'shirushi-inspection-helper.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) { throw 'DEV_HELPER_COPY_CHANGED' }
-          if ((Get-FileHash -LiteralPath (Join-Path $root 'inspection-helper.manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) { throw 'DEV_MANIFEST_COPY_CHANGED' }
-          "SHIRUSHI_DEV_INSPECTION_ROOT=$root" >> $env:GITHUB_ENV
+          if ((Get-Item -LiteralPath $helper).Length -ne $size -or (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha -or $diagnostic.Trim() -ne "DEVELOPMENT_MANIFEST_SHA256: $digest") { throw 'CANONICAL_PREBUILD_INPUT_CHANGED' }
+          # Only the canonical raw digest authorizes application compilation.
+          # Remaining absolute paths below are explicit native TEST fixtures.
           "SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
           "SHIRUSHI_CANARY_TRUSTED_MANIFEST=$manifest" >> $env:GITHUB_ENV
           "SHIRUSHI_CANARY_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
@@ -239,8 +243,8 @@ jobs:
           # no upload/transport, no application launch or package production.
           if ((Get-Item -LiteralPath $log).Length -gt 2097152) { throw 'LIMITED_TEST_CONTROL_TOO_LARGE' }
           $control = [IO.File]::ReadAllText($log)
-          if ($control -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;' -or $control -notmatch 'application_dispatch_fixture_success_cleanup_and_sequential_repetition' -or $control -notmatch 'application_dispatch_failure_then_success_preserves_source') { throw 'LIMITED_NATIVE_TESTS_NOT_EXECUTED' }
-          'LIMITED_NATIVE_APPLICATION_TESTS: 2 passed; fixed fixture success and failure-then-success; exact cfg active'
+          if ($control -notmatch 'test result: ok\. 6 passed; 0 failed; 1 ignored;' -or $control -notmatch 'application_dispatch_fixture_success_cleanup_and_sequential_repetition' -or $control -notmatch 'application_dispatch_failure_then_success_preserves_source' -or $control -notmatch 'development_resolver_raw_manifest_and_helper_tamper_fail_closed') { throw 'LIMITED_NATIVE_TESTS_NOT_EXECUTED' }
+          'LIMITED_NATIVE_APPLICATION_TESTS: 2 dispatch + 4 focused resolver passed; 1 explicit post-assembly test pending'
 
       - name: Assemble and independently audit actual same-job development bytes
         id: limited_package
@@ -249,9 +253,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $frozen = @{
-            'scripts/package_v02_development.py' = '02ea541d88faeb4d500ae2040fc2021ca97ac65ca3bfb4aee53af80c6603cc1d'
-            'tests/test_package_v02_development.py' = '621496a3803c795e3603676f692ec1ed3f97aa58954eb6796873274349e468d0'
-            'docs/development/v02-development-package.md' = 'c234145c4c6829309c8bbfe66eeb57ded144ca81429e926e09d85bc5057bc8b6'
+            'scripts/package_v02_development.py' = '2b62440b5123f117ead8159331a26853ac365cbf7552231184152302872463f6'
+            'tests/test_package_v02_development.py' = '6395c7c042c2768f88b27aa2517b4e3792ad8b10512ca04dc3b9eca59ae52b1c'
+            'docs/development/v02-development-package.md' = 'aa3cfd2e59ee8a8bef2055319a432d661174c0d4a3160429ea7f6b2a8411e84a'
           }
           foreach ($path in $frozen.Keys) {
             if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $frozen[$path]) { throw 'FROZEN_ASSEMBLER_SOURCE_CHANGED' }
@@ -332,7 +336,7 @@ jobs:
           require(before[HELPER]['sha256'] == os.environ['SHIRUSHI_CANARY_HELPER_SHA256'], 'FROZEN_HELPER_CHANGED')
           config_raw = small(root/'desktop/tauri.conf.json', 65536)
           require(json.loads(config_raw)['bundle']['active'] is False, 'BUNDLE_ACTIVE_CHANGED')
-          tools = {'scripts/package_v02_development.py': '02ea541d88faeb4d500ae2040fc2021ca97ac65ca3bfb4aee53af80c6603cc1d', 'tests/test_package_v02_development.py': '621496a3803c795e3603676f692ec1ed3f97aa58954eb6796873274349e468d0', 'docs/development/v02-development-package.md': 'c234145c4c6829309c8bbfe66eeb57ded144ca81429e926e09d85bc5057bc8b6'}
+          tools = {'scripts/package_v02_development.py': '2b62440b5123f117ead8159331a26853ac365cbf7552231184152302872463f6', 'tests/test_package_v02_development.py': '6395c7c042c2768f88b27aa2517b4e3792ad8b10512ca04dc3b9eca59ae52b1c', 'docs/development/v02-development-package.md': 'aa3cfd2e59ee8a8bef2055319a432d661174c0d4a3160429ea7f6b2a8411e84a'}
           def tools_unchanged():
               for name, expected in tools.items(): require(digest(root/name, 32768)['sha256'] == expected, 'FROZEN_ASSEMBLER_SOURCE_CHANGED')
           tools_unchanged()
@@ -409,6 +413,50 @@ jobs:
           '@ | & .\.venv-py312\Scripts\python.exe -B -
           if ($LASTEXITCODE -ne 0) { throw 'DEVELOPMENT_PACKAGE_EVIDENCE_FAILED' }
 
+      - name: Prove canonical compiled digest and copied-package native preflight
+        id: limited_binding
+        shell: pwsh
+        env:
+          RUSTFLAGS: --cfg shirushi_real_helper_canary --cfg shirushi_dev_limited_inspection_canary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $evidence = Join-Path $env:RUNNER_TEMP 'v02-development-assembly-evidence'
+          $a = Join-Path $evidence 'package-a'
+          $repeated = Join-Path $evidence 'package-b'
+          $moved = Join-Path $env:RUNNER_TEMP 'v02-development-moved-package-b'
+          $trusted = Get-Item -LiteralPath $env:SHIRUSHI_CANARY_TRUSTED_MANIFEST
+          if ($trusted.PSIsContainer -or ($trusted.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $trusted.Length -gt 4096) { throw 'PREBUILD_MANIFEST_NOT_BOUNDED_REGULAR' }
+          $raw = [IO.File]::ReadAllBytes($trusted.FullName)
+          if ((Get-FileHash -LiteralPath $trusted.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256) { throw 'COMPILED_DIGEST_INPUT_CHANGED' }
+          foreach ($root in @($a,$repeated)) {
+            $manifest = Join-Path $root 'inspection-helper.manifest.json'
+            $file = Get-Item -LiteralPath $manifest
+            if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 4096) { throw 'PACKAGE_MANIFEST_NOT_BOUNDED_REGULAR' }
+            if (-not [Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($raw,[IO.File]::ReadAllBytes($manifest))) { throw 'PREBUILD_PACKAGED_RAW_MANIFEST_DIFFERS' }
+          }
+          'PREBUILD_PACKAGE_MANIFEST_RAW_BYTES: BOTH_ASSEMBLIES_EXACTLY_EQUAL'
+          if (Test-Path -LiteralPath $moved) { throw 'MOVED_PACKAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $moved -ErrorAction Stop | Out-Null
+          foreach ($name in @('shirushi-desktop.exe','shirushi-inspection-helper.exe','inspection-helper.manifest.json')) {
+            $source = Join-Path $a $name
+            $file = Get-Item -LiteralPath $source
+            if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 268435456) { throw 'PACKAGE_COPY_NOT_REGULAR_BOUNDED' }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $moved $name) -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $moved $name) -Algorithm SHA256).Hash) { throw 'MOVED_PACKAGE_COPY_DIFFERS' }
+          }
+          $env:SHIRUSHI_CANARY_PACKAGE_A = $a
+          $env:SHIRUSHI_CANARY_PACKAGE_B = $moved
+          $log = Join-Path $env:RUNNER_TEMP 'limited-moved-package-control.log'
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test limited_inspection real_assembled_package_move_preflight -- --ignored --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $nativeExit = $LASTEXITCODE
+          if ($nativeExit -ne 0) { exit $nativeExit }
+          if ((Get-Item -LiteralPath $log).Length -gt 2097152) { throw 'MOVED_PACKAGE_CONTROL_TOO_LARGE' }
+          $control = [IO.File]::ReadAllText($log)
+          if ($control -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;' -or $control -notmatch 'REAL_MOVED_PACKAGE_PREFLIGHT: BOTH_ROOTS_PASS; COMPILED_RAW_DIGEST_MATCH; HELPER_IDENTITY_MATCH; NO_UI_LAUNCH') { throw 'MOVED_PACKAGE_NATIVE_TEST_NOT_EXECUTED' }
+          if ((Get-FileHash -LiteralPath $trusted.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256) { throw 'FINAL_TRUSTED_DIGEST_CHANGED' }
+          'DEVELOPMENT_EXECUTABLE_RELATIVE_BINDING: COMPILED_DIGEST_AND_BOTH_ROOTS_PROVEN; UI_NOT_LAUNCHED'
+
       - name: Final immutable-input/index checks and bounded native summary
         if: always()
         shell: pwsh
@@ -432,13 +480,14 @@ jobs:
             $before = '${{ steps.limited_preflight.outputs.index_sha }}'
             if ($LASTEXITCODE -ne 0 -or $before -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash.ToLowerInvariant() -ne $before) { throw 'FINAL_INDEX_CHANGED_OR_BASELINE_MISSING' }
             'LOCK_FIXTURE_INDEX_PRESERVATION: PASS'
-            $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}','${{ steps.limited_package.outcome }}')
+            $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}','${{ steps.limited_package.outcome }}','${{ steps.limited_binding.outcome }}')
             if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'LIMITED_INSPECTION_NATIVE_CI_PRECEDING_STEP_FAILED' }
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
             'V02_DEVELOPMENT_PACKAGE_ASSEMBLY_PASS'
+            'V02_DEVELOPMENT_PACKAGE_RUNTIME_BINDING_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; runtime binding UNPROVEN; installer assembly NOT RUN', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; executable-relative binding test: ${{ steps.limited_binding.outcome }}; installer assembly NOT RUN', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'ARTIFACT_UPLOAD_COUNT: 0'
           }
 
