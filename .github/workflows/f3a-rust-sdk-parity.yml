@@ -457,7 +457,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $trusted.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256) { throw 'FINAL_TRUSTED_DIGEST_CHANGED' }
           'DEVELOPMENT_EXECUTABLE_RELATIVE_BINDING: COMPILED_DIGEST_AND_BOTH_ROOTS_PROVEN; UI_NOT_LAUNCHED'
 
-      - name: Observe actual MSVC toolset and resolved VC libraries in new diagnostic relinks
+      - name: Observe selected MSVC toolsets for the approved deployment floor
         id: limited_vc_toolset
         shell: pwsh
         run: |
@@ -467,7 +467,7 @@ jobs:
           import hashlib, json, os, re, stat, struct, subprocess, sys, threading
           from pathlib import Path
           LIMIT = 16777216
-          VC = re.compile(r'(?:lib)?(?:vcruntime|msvcrt|msvcprt|libcmt|libcpmt)d?\.lib$', re.I)
+          FLOOR = '14.51.36247.0'
           ROOT = re.compile(r'(?P<root>.+[\\/]VC[\\/]Tools[\\/]MSVC[\\/](?P<version>[0-9]+\.[0-9]+\.[0-9]+))[\\/]bin[\\/]Host(?:x64|x86)[\\/]x64[\\/]link\.exe$', re.I)
           def require(ok, code):
               if not ok: raise ValueError(code)
@@ -489,107 +489,73 @@ jobs:
               after = path.stat()
               require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns), 'TOOLCHAIN_SOURCE_CHANGED')
               return dict(size=after.st_size,sha256=digest.hexdigest())
-          def import_machine(path):
-              regular(path,134217728)
-              machines = set(); imports = 0
+          def binary_machine(path):
               with path.open('rb') as stream:
-                  require(stream.read(8)==b'!<arch>\n', 'VC_LIBRARY_NOT_COFF_ARCHIVE')
-                  position = 8; size = path.stat().st_size
-                  while position < size:
-                      require(position+60<=size, 'VC_ARCHIVE_TRUNCATED')
-                      stream.seek(position); header = stream.read(60)
-                      require(header[58:]==b'`\n', 'VC_ARCHIVE_MEMBER_INVALID')
-                      count = int(header[48:58].strip()); start = position+60
-                      require(0<=count<=size-start, 'VC_ARCHIVE_MEMBER_BOUND')
-                      name = header[:16].strip()
-                      if name not in (b'/',b'//'):
-                          prefix = stream.read(min(20,count))
-                          if len(prefix)>=20 and prefix[:4]==b'\0\0\xff\xff':
-                              machines.add(struct.unpack_from('<H',prefix,6)[0])
-                              if struct.unpack_from('<H',prefix,4)[0]==0: imports += 1
-                          elif len(prefix)>=20: machines.add(struct.unpack_from('<H',prefix)[0])
-                      position = start+count+(count&1)
-              require(machines=={0x8664}, 'VC_LIBRARY_X64_UNPROVEN')
-              if re.fullmatch(r'vcruntimed?\.lib',path.name,re.I): require(imports>0, 'VC_IMPORT_LIBRARY_X64_UNPROVEN')
-              return dict(machine='0x8664',shortImportMembers=imports)
-          def metadata(paths):
-              script = "$p=[Console]::In.ReadToEnd()|ConvertFrom-Json; @($p|ForEach-Object {$v=(Get-Item -LiteralPath $_ -ErrorAction Stop).VersionInfo; @{basename=[IO.Path]::GetFileName($_);FileVersion=$v.FileVersion;ProductVersion=$v.ProductVersion;MicrosoftCompany=($v.CompanyName -eq 'Microsoft Corporation')}})|ConvertTo-Json -Compress"
-              answer = subprocess.run(['pwsh','-NoLogo','-NoProfile','-NonInteractive','-Command',script],input=json.dumps([str(p) for p in paths]).encode(),capture_output=True,timeout=30)
-              require(answer.returncode==0 and len(answer.stdout)<=8192 and len(answer.stderr)<=8192, 'TOOLCHAIN_METADATA_UNPROVEN')
-              rows = json.loads(answer.stdout)
-              require(isinstance(rows,list) and len(rows)==3, 'TOOLCHAIN_METADATA_SHAPE')
-              for row in rows:
-                  require(set(row)=={'basename','FileVersion','ProductVersion','MicrosoftCompany'} and row['MicrosoftCompany'] is True, 'TOOLCHAIN_VENDOR_CONFLICT')
-                  for key in ('FileVersion','ProductVersion'):
-                      require(isinstance(row[key],str) and re.fullmatch(r'[0-9. ]{1,64}',row[key]), 'TOOLCHAIN_VERSION_UNPROVEN')
-              return rows
+                  header = stream.read(64)
+                  require(len(header)==64 and header[:2]==b'MZ', 'DIAGNOSTIC_BINARY_PE_UNPROVEN')
+                  offset = struct.unpack_from('<I',header,60)[0]
+                  require(64<=offset<=path.stat().st_size-6, 'DIAGNOSTIC_BINARY_PE_BOUND')
+                  stream.seek(offset); pe = stream.read(6)
+                  require(pe[:4]==b'PE\0\0' and struct.unpack_from('<H',pe,4)[0]==0x8664, 'DIAGNOSTIC_BINARY_X64_UNPROVEN')
+              return '0x8664'
+          def metadata(link):
+              script = "$p=[Console]::In.ReadToEnd()|ConvertFrom-Json; $v=(Get-Item -LiteralPath $p -ErrorAction Stop).VersionInfo; @{FileVersion=$v.FileVersion;ProductVersion=$v.ProductVersion;MicrosoftCompany=($v.CompanyName -eq 'Microsoft Corporation')}|ConvertTo-Json -Compress"
+              answer = subprocess.run(['pwsh','-NoLogo','-NoProfile','-NonInteractive','-Command',script],input=json.dumps(str(link)).encode(),capture_output=True,timeout=30)
+              require(answer.returncode==0 and len(answer.stdout)<=4096 and len(answer.stderr)<=4096, 'LINKER_METADATA_UNPROVEN')
+              row = json.loads(answer.stdout)
+              require(set(row)=={'FileVersion','ProductVersion','MicrosoftCompany'} and row['MicrosoftCompany'] is True, 'LINKER_VENDOR_CONFLICT')
+              for key in ('FileVersion','ProductVersion'):
+                  require(isinstance(row[key],str) and re.fullmatch(r'[0-9. ]{1,64}',row[key]), 'LINKER_VERSION_UNPROVEN')
+              return row
           def selected(log):
-              # --print=link-args format is debugging-only; reject unknown forms.
-              invocations = [line for line in log.splitlines() if 'link.exe' in line.lower() and ('/OUT:' in line.upper() or '-OUT:' in line.upper())]
-              candidates = set()
-              for line in invocations:
-                  for value in re.findall(r'"([^"\r\n]*[\\/]link\.exe)"',line,re.I):
-                      candidates.add(value.replace('\\\\','\\'))
+              # Debugging format is not stable: missing/ambiguous forms fail closed.
+              lines = [line for line in log.splitlines() if 'link.exe' in line.lower() and '/OUT:' in line.upper()]
+              candidates = {value.replace('\\\\','\\') for line in lines for value in re.findall(r'"([^"\r\n]*[\\/]link\.exe)"',line,re.I)}
               require(len(candidates)==1, 'ACTUAL_LINKER_SELECTION_UNPROVEN')
               link = Path(next(iter(candidates))); match = ROOT.fullmatch(str(link))
-              require(match is not None, 'SELECTED_MSVC_ROOT_UNPROVEN')
-              root = Path(match['root']); resolved = set(); search = None; found = False
-              for line in log.splitlines():
-                  searched = re.match(r'^\s*Searching (.+\.lib):\s*$',line,re.I)
-                  if searched:
-                      search = Path(searched[1].strip().strip('"')); found = False
-                      continue
-                  if re.match(r'^\s*Found\s+\S',line): found = True
-                  loaded = re.match(r'^\s*Loaded (.+\.lib)\(.+\)\s*$',line,re.I)
-                  if loaded:
-                      value = Path(loaded[1].strip().strip('"'))
-                      if not VC.fullmatch(value.name): continue
-                      require(search is not None and found and search.is_absolute() and search.name.lower()==value.name.lower(), 'VC_RESOLUTION_ATTRIBUTION_UNPROVEN')
-                      if value.is_absolute(): require(value==search, 'VC_RESOLUTION_CONFLICT')
-                      resolved.add(search)
-              require(resolved and any(re.fullmatch(r'vcruntimed?\.lib',p.name,re.I) for p in resolved), 'RESOLVED_VC_IMPORT_LIBRARY_UNPROVEN')
-              libraries = []
-              for path in sorted(resolved,key=str):
-                  require(path.parent==root/'lib'/'x64', 'VC_LIBRARY_TOOLSET_CONFLICT')
-                  libraries.append(dict(basename=path.name,relativePath=path.relative_to(root).as_posix(),**measure(path),**import_machine(path)))
-              tools = [link.parent/name for name in ('cl.exe','link.exe','lib.exe')]
-              tool_rows = metadata(tools)
-              for tool,row in zip(tools,tool_rows):
-                  require(row['basename']==tool.name, 'TOOLCHAIN_METADATA_ROLE_CONFLICT')
-                  row.update(measure(tool),executedByDiagnostic=False)
-              tool_rows[1]['executedByDiagnostic'] = True
-              version = match['version']
+              require(link.is_absolute() and match is not None, 'SELECTED_MSVC_ROOT_UNPROVEN')
+              root = Path(match['root']); version = match['version']
               environment = {}
               for name in ('VCToolsVersion','VCToolsInstallDir'):
                   value = os.environ.get(name)
                   if value is None: environment[name] = 'UNSET_UNPROVEN'
                   else:
                       agrees = value.strip()==version if name=='VCToolsVersion' else Path(value).resolve()==root.resolve()
-                      environment[name] = 'MATCH' if agrees else 'CONFLICT'
-                      require(agrees, 'SELECTED_TOOLSET_ENVIRONMENT_CONFLICT')
-              default_fact = {}
+                      environment[name] = 'MATCH' if agrees else 'DIFFERENT_NOT_SELECTION_AUTHORITY'
+              environment['VCToolsRedistDir'] = 'PRESENT_NOT_SELECTION_AUTHORITY' if os.environ.get('VCToolsRedistDir') else 'UNSET_UNPROVEN'
+              defaults = {}
               for kind in ('VCTools','VCRedist'):
-                  default = root.parents[2]/'Auxiliary'/'Build'/('Microsoft.'+kind+'Version.default.txt')
-                  fact = dict(state='ABSENT_UNPROVEN')
-                  if default.exists():
-                      regular(default,4096); raw = default.read_bytes()
-                      value = raw.decode('utf-8-sig').strip()
-                      require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?',value), 'DEFAULT_TOOLSET_METADATA_UNPROVEN')
-                      fact = dict(state='MATCH' if value==version else 'CORROBORATION_ONLY_NOT_SELECTED',version=value,sha256=hashlib.sha256(raw).hexdigest())
-                  default_fact[kind] = fact
-              return dict(selectedToolset=version,selectedRoot='VC/Tools/MSVC/'+version,linkerRelativePath=link.relative_to(root).as_posix(),tools=tool_rows,environment=environment,defaultMetadata=default_fact,resolvedVcLibraries=libraries,clParticipation='NOT_ESTABLISHED',minimumPolicy='NOT_SET_BY_CI')
+                  path = root.parents[2]/'Auxiliary'/'Build'/('Microsoft.'+kind+'Version.default.txt')
+                  fact = dict(state='ABSENT_OR_UNAVAILABLE_UNPROVEN')
+                  try:
+                      if path.exists():
+                          regular(path,4096)
+                          with path.open('rb') as stream: raw = stream.read(4097)
+                          require(len(raw)<=4096, 'DEFAULT_METADATA_SIZE_BOUND')
+                          value = raw.decode('utf-8-sig').strip()
+                          if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?',value):
+                              fact = dict(state='CORROBORATION_ONLY_NOT_SELECTION_AUTHORITY',version=value,sha256=hashlib.sha256(raw).hexdigest())
+                          else: fact = dict(state='FORMAT_UNPROVEN')
+                  except (OSError,UnicodeError): pass
+                  except ValueError: fact = dict(state='OPTIONAL_METADATA_REJECTED_UNPROVEN')
+                  defaults[kind] = fact
+              return dict(selectedToolset=version,selectedRoot='VC/Tools/MSVC/'+version,linkerRelativePath=link.relative_to(root).as_posix(),linker=dict(basename=link.name,**measure(link),**metadata(link)),environment=environment,defaultMetadata=defaults,clParticipation='NOT_ESTABLISHED',buildCompatibilityMinimum='UNPROVEN_PARKED')
+          def floor_check(version):
+              selected = tuple(int(value) for value in version.split('.'))
+              floor = tuple(int(value) for value in FLOOR.split('.'))
+              require(selected<=floor[:3], 'VC_FROZEN_CANDIDATE_BELOW_SELECTED_TOOLSET')
+              require(selected<floor[:3], 'VC_DEPLOYMENT_FLOOR_COMPATIBILITY_UNPROVEN')
+              return 'SELECTED_TOOLSET_PREFIX_STRICTLY_BELOW_FLOOR'
           def main():
-              evidence = Path(os.environ['RUNNER_TEMP'])/'v02-vc-toolchain-evidence'
+              evidence = Path(os.environ['RUNNER_TEMP'])/'v02-vc-floor-toolchain-evidence'
               evidence.mkdir(exist_ok=False)
               require('RUSTC_LOG' not in os.environ, 'UNEXPECTED_PREEXISTING_DIAGNOSTIC_LOGGING')
-              diagnostic_env = os.environ.copy()
-              diagnostic_env['RUSTC_LOG'] = 'rustc_codegen_ssa::back::link=info'
               target = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc'/'debug'
               jobs = [('helper','tools/f3a-rust-sdk-parity/Cargo.toml','shirushi-inspection-helper'),('desktop','desktop/Cargo.toml','shirushi-desktop')]
               facts = []
               for role,manifest,name in jobs:
                   binary = target/(name+'.exe'); before = measure(binary)
-                  args = ['cargo','+1.88.0','rustc','--locked','--offline','--target','x86_64-pc-windows-msvc','--manifest-path',manifest,'--bin',name,'--','--print=link-args','-C','link-arg=/VERBOSE:LIB']
+                  args = ['cargo','+1.88.0','rustc','--locked','--offline','--target','x86_64-pc-windows-msvc','--manifest-path',manifest,'--bin',name,'--','--print=link-args']
                   streams = [evidence/(role+'.'+suffix) for suffix in ('stdout','stderr')]
                   sizes = [0,0]; capture_errors = []
                   def drain(index, pipe):
@@ -600,7 +566,7 @@ jobs:
                                   out.write(block[:keep]); sizes[index] += len(block)
                       except Exception: capture_errors.append(index)
                       finally: pipe.close()
-                  process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=diagnostic_env)
+                  process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                   readers = [threading.Thread(target=drain,args=(i,pipe),daemon=True) for i,pipe in enumerate((process.stdout,process.stderr))]
                   for reader in readers: reader.start()
                   try: process.wait(timeout=2400)
@@ -610,20 +576,21 @@ jobs:
                   for reader in readers: reader.join(timeout=30)
                   require(not capture_errors and not any(t.is_alive() for t in readers), 'VC_DIAGNOSTIC_CAPTURE_INCOMPLETE')
                   after = measure(binary)
-                  emit('VC_DIAGNOSTIC_RELINK_BINARY',dict(role=role,kind='NEW_DIAGNOSTIC_RELINK',diagnosticLogging='rustc_codegen_ssa::back::link=info',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],before=before,after=after,sameBytes=before==after,exitCode=process.returncode,stdoutBytes=sizes[0],stderrBytes=sizes[1],historicalBinaryEquivalenceClaim=False))
+                  emit('VC_DIAGNOSTIC_RELINK_BINARY',dict(role=role,kind='NEW_DIAGNOSTIC_RELINK',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],before=before,after=after,sameBytes=before==after,exitCode=process.returncode,stdoutBytes=sizes[0],stderrBytes=sizes[1],historicalBinaryEquivalenceClaim=False))
                   require(process.returncode==0, 'VC_DIAGNOSTIC_RELINK_FAILED')
                   require(all(size<=LIMIT for size in sizes), 'VC_DIAGNOSTIC_CAPTURE_TOO_LARGE')
                   log = '\n'.join(p.read_bytes().decode('utf-8','replace') for p in streams)
-                  value = selected(log); facts.append(value)
-                  emit('ACTUAL_VC_BUILD_TOOLCHAIN',dict(role=role,kind='NEW_DIAGNOSTIC_RELINK',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],binary=after,**value))
-              require(len({f['selectedToolset'] for f in facts})==1, 'COMPONENT_TOOLSET_CONFLICT')
-              emit('VC_TOOLCHAIN_EVIDENCE_RESULT',dict(classification='NEW_DIAGNOSTIC_RELINK_TOOLSET_AND_VC_IMPORT_LIBRARIES_PROVEN',historicalEvidenceReplaced=False,priorAssembledPackagesReplaced=False,candidateExecuted=False,artifactUploadCount=0))
+                  value = selected(log)
+                  emit('ACTUAL_VC_FLOOR_BUILD_TOOLCHAIN',dict(role=role,kind='NEW_DIAGNOSTIC_RELINK',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],binary=after,machine=binary_machine(binary),deploymentReadinessFloor=FLOOR,**value))
+                  comparison = floor_check(value['selectedToolset'])
+                  facts.append(dict(role=role,toolset=value['selectedToolset'],comparison=comparison))
+              emit('VC_DEPLOYMENT_FLOOR_TOOLSET_RESULT',dict(classification='VC_DEPLOYMENT_FLOOR_COMPATIBILITY_CONFIRMED',components=facts,deploymentReadinessFloor=FLOOR,buildCompatibilityMinimum='UNPROVEN_PARKED',historicalEvidenceReplaced=False,priorAssembledPackagesReplaced=False,candidateExecuted=False,artifactUploadCount=0))
           try: main()
           except Exception as error:
               code = str(error) if isinstance(error,ValueError) and re.fullmatch(r'[A-Z0-9_]+',str(error)) else type(error).__name__
-              emit('VC_TOOLCHAIN_EVIDENCE_GAP',dict(code=code,minimumPolicy='UNPROVEN',automaticRetry=0)); sys.exit(1)
+              emit('VC_DEPLOYMENT_FLOOR_EVIDENCE_GAP',dict(code=code,buildCompatibilityMinimum='UNPROVEN_PARKED',policyChanged=False,automaticRetry=0)); sys.exit(1)
           '@ | & .\.venv-py312\Scripts\python.exe -B -
-          if ($LASTEXITCODE -ne 0) { throw 'VC_TOOLCHAIN_EVIDENCE_UNPROVEN' }
+          if ($LASTEXITCODE -ne 0) { throw 'VC_DEPLOYMENT_FLOOR_COMPATIBILITY_UNPROVEN' }
 
       - name: Final immutable-input/index checks and bounded native summary
         if: always()
