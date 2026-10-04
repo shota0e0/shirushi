@@ -276,11 +276,27 @@ def _unchanged(snapshot: FileSnapshot) -> None:
         _fail("SOURCE_CHANGED")
 
 
-def _manifest(snapshot: InputSnapshot) -> bytes:
-    raw = _canonical({"schemaVersion": 1, "relativePath": HELPER, "size": snapshot.helper.size,
-                      "sha256": snapshot.helper.sha256, "protocolVersion": 1})
+def _helper_manifest(size: int, sha256: str) -> bytes:
+    raw = _canonical({"schemaVersion": 1, "relativePath": HELPER, "size": size,
+                      "sha256": sha256, "protocolVersion": 1})
     parse_manifest(raw)
     return raw
+
+
+def prepare_manifest(helper: str | Path) -> bytes:
+    """Build-time canonical bytes from an explicit, actual helper; no approval."""
+    path = _path(helper)
+    if path.name != HELPER:
+        _fail("SOURCE_BASENAME_INVALID")
+    metadata, size, sha = _read_file(path, MAX_EXECUTABLE, 3)
+    frozen = FileSnapshot(path, _stamp(metadata), size, sha)
+    raw = _helper_manifest(size, sha)
+    _unchanged(frozen)
+    return raw
+
+
+def _manifest(snapshot: InputSnapshot) -> bytes:
+    return _helper_manifest(snapshot.helper.size, snapshot.helper.sha256)
 
 
 def _record(snapshot: InputSnapshot, manifest: bytes) -> dict:
@@ -429,8 +445,7 @@ def assemble(desktop: str | Path, helper: str | Path, output_root: str | Path,
         _, size, sha = _read_file(stage / HELPER, MAX_EXECUTABLE, 3)
         if size != frozen.helper.size or sha != frozen.helper.sha256:
             _fail("STAGED_HELPER_CHANGED")
-        manifest = _canonical({"schemaVersion": 1, "relativePath": HELPER, "size": size,
-                               "sha256": sha, "protocolVersion": 1})
+        manifest = _helper_manifest(size, sha)
         if manifest != _manifest(frozen):
             _fail("MANIFEST_IDENTITY_MISMATCH")
         _stage_destination(stage / MANIFEST, owner)
@@ -477,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
         check.add_argument("--package-root", required=True)
         check.add_argument("--record", required=True)
         check.add_argument("--expected-record-sha256", required=True)
+        prepare = commands.add_parser("prepare-manifest")
+        prepare.add_argument("--helper", required=True)
         arguments = parser.parse_args(argv)
         if arguments.command == "assemble":
             value = assemble(arguments.desktop, arguments.helper, arguments.output_root)
@@ -486,6 +503,13 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.buffer.write(raw)
             sys.stdout.buffer.flush()
             print("DEVELOPMENT_RECORD_SHA256: " + hashlib.sha256(raw).hexdigest(), file=sys.stderr)
+        elif arguments.command == "prepare-manifest":
+            raw = prepare_manifest(arguments.helper)
+            # Exactly the bytes later emitted into the three-file package:
+            # no LF/BOM. Capture externally BEFORE Desktop compilation.
+            sys.stdout.buffer.write(raw)
+            sys.stdout.buffer.flush()
+            print("DEVELOPMENT_MANIFEST_SHA256: " + hashlib.sha256(raw).hexdigest(), file=sys.stderr)
         else:
             record_path, package = _path(arguments.record), _path(arguments.package_root)
             if record_path == package or package in record_path.parents:

@@ -2,9 +2,12 @@
 
 This is a bounded byte-assembly mechanism for `DEVELOPMENT_PACKAGE`, not an
 installer or Production package. It does not build or execute either binary.
-The mechanism's synthetic tests do not prove a real native assembly or a working
-relocated Desktop. Real native assembly evidence is currently
-`NATIVE_ASSEMBLY_NOT_RUN`; the overall delivery Gate remains PARTIAL.
+The mechanism's synthetic tests alone do not prove a real native assembly or a
+working relocated Desktop. Assembly was accepted at feature commit
+`9d10a20f277c941b2a9dda18410e6de6ddfae21e`, validation commit
+`99d951e4b6bd2d1f386325d769fa31fd9d71819f`, CI run `37175939344`.
+The separate executable-relative runtime-binding validation remains pending until
+the current native CI proves compiled-digest and moved-package preflight agreement.
 
 ## Exact layout and manifest
 
@@ -100,17 +103,64 @@ tampering by this assembler. It establishes byte continuity from the selected
 inputs, not that the inputs were built from an accepted commit, signed, safe, or
 approved. Input provenance and review remain separate requirements.
 
+## Canonical preparation before Desktop compilation
+
+The single build-time canonical generator is:
+
+```text
+python scripts/package_v02_development.py prepare-manifest --helper C:\DevBuild\shirushi-inspection-helper.exe
+```
+
+It requires an explicit actual helper with the same local/regular/reparse/identity
+and x64 console PE checks as assembly. It internally captures size/SHA/identity,
+serializes through the same helper-manifest function used for the actual staged
+helper, and rechecks the captured helper before returning. No caller-provided
+expected helper hash authorizes replacement. Preparation does not need Desktop
+bytes and does not build, execute, or approve the helper.
+
+Capture its stdout externally as raw bytes: canonical ASCII JSON with **no LF or
+BOM**. Stderr's `DEVELOPMENT_MANIFEST_SHA256` covers those exact manifest bytes.
+This differs intentionally from the assembly evidence record, which ends in LF.
+Use byte-preserving capture, never Windows PowerShell 5.1 text redirection.
+
+The build order is helper build → canonical manifest preparation → independently
+freeze SHA-256 of those raw bytes → set compile-time
+`SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256` → Desktop build → assemble with the same
+helper → require packaged and prebuild manifest bytes to match exactly. The
+previous insertion-order PowerShell JSON was logically equivalent but had a
+different raw digest; it must not authorize canonical package bytes. No expected
+digest is read or derived from the package at runtime.
+
 ## Runtime and authority limits
 
-`runtimeBinding` intentionally remains `UNPROVEN`. The current development Rust
-runner uses independently frozen compile-time development helper root/manifest
-inputs; copying siblings does not introduce directory discovery or bind the
-relocated package to that runner. Release execution remains development-boundary
-limited. No Tauri configuration is changed (`bundle.active` remains false).
-No Desktop/helper launch, inspection fixture, UI integration, Python fallback,
-WebView2/VC prerequisite installation, signing, installer generation, or zero-setup
-claim is included in this mechanism Gate. Any package runtime-binding change
-requires a separate Owner-approved Gate.
+The assembler evidence record's `runtimeBinding` intentionally remains `UNPROVEN`:
+byte assembly cannot certify how Desktop was compiled. The Windows debug-only
+development application now obtains its actual path using `current_exe()`, takes
+that executable's parent, and reuses unchanged `CanaryPackage` preflight with the
+independently embedded compile-time digest. No compile-time absolute root is
+required. CWD, argv, PATH, registry, runtime environment root/digest values, and
+frontend input cannot select the root or authorize its contents.
+
+The resolver checks an absolute regular non-reparse executable-path leaf. Existing
+package preflight retains fixed helper/manifest basenames, local fixed-drive and
+ancestor/root reparse checks, raw manifest digest, helper size/SHA, retained guards,
+pre-resume process identity, and supervisor cleanup. Moving the unchanged three
+files is expected to preserve that development contract without rebuilding.
+Focused tests may inject a controlled executable path only through a Windows
+debug/explicit-native-test cfg surface; it still uses the compiled digest. The
+normal dispatch tests use the actual current test executable's sibling directory.
+An ignored post-assembly test is explicitly executed in CI against actual package
+A and its copied package B, not the full UI. These tests do not add application
+runtime discovery or environment overrides.
+
+Release execution remains development-boundary limited. No Tauri configuration
+is changed (`bundle.active` remains false).
+Assembly and moved-package preflight do not launch Desktop or helper. Separately,
+the accepted native CI regression floor still executes the real Rust helper and
+limited-inspection fixture through the normal application dispatch. No full UI
+launch, Python inspection fallback, WebView2/VC prerequisite installation,
+signing, installer generation, or zero-setup claim is included. Any further
+runtime-binding authority change requires a separate Owner-approved Gate.
 
 Filesystem checks detect observable pre/post-copy substitutions and changed
 reparse/identity state. They are not a kernel-level defense against a hostile

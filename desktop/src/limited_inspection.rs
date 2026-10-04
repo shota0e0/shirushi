@@ -1,5 +1,6 @@
 //! Development-only application connection to the accepted Rust supervisor.
 //! No runtime helper discovery, Python fallback, or Production package authority.
+#![allow(unexpected_cfgs)] // Narrow explicit CI-only resolver test surface.
 use crate::inspection_protocol::{HelperOutcome, RequestIdentity, ServiceFailure};
 use crate::inspection_supervisor::{Control, ProcessReport};
 use crate::protocol::BridgeError;
@@ -225,21 +226,62 @@ fn transport_report(report: ProcessReport) -> Value {
         HelperOutcome::Failure(error) => failed(error),
     }
 }
+#[cfg(all(windows, debug_assertions))]
+fn resolve_development_package(
+    executable: &Path,
+    trusted_manifest_digest: &str,
+) -> Result<crate::inspection_package::CanaryPackage, ServiceFailure> {
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use std::path::Component;
+    let unavailable = ServiceFailure::ServiceUnavailable;
+    if !executable.is_absolute()
+        || !matches!(executable.components().next_back(), Some(Component::Normal(name))
+            if !name.encode_wide().any(|c| c == b':' as u16 || c == 0))
+    {
+        return Err(unavailable);
+    }
+    let root = executable.parent().ok_or(unavailable)?;
+    // Existing preflight pins the local fixed-drive ancestors/root and both
+    // sibling files, verifies raw manifest/helper bytes, and retains all guards.
+    // Establish its fixed-drive/no-network boundary before any executable-leaf
+    // metadata lookup, including when a test supplies an untrusted UNC path.
+    let package =
+        crate::inspection_package::CanaryPackage::preflight(root, trusted_manifest_digest)
+            .map_err(|_| unavailable)?;
+    let metadata = std::fs::symlink_metadata(executable).map_err(|_| unavailable)?;
+    if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 {
+        return Err(unavailable);
+    }
+    Ok(package)
+}
+
+/// Explicit native-test path injection only; absent from normal and release
+/// application builds. Even this test surface uses ONLY the compiled digest.
+#[cfg(all(windows, debug_assertions, shirushi_dev_limited_inspection_canary))]
+#[doc(hidden)]
+pub fn development_package_preflight_for_canary(
+    executable: &Path,
+) -> Result<crate::inspection_package::CanaryPackage, ServiceFailure> {
+    let digest = option_env!("SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256")
+        .ok_or(ServiceFailure::ServiceUnavailable)?;
+    resolve_development_package(executable, digest)
+}
+
 impl InspectionInvocation {
     pub(crate) fn run(self) -> Value {
         #[cfg(all(windows, debug_assertions))]
         {
             self.run_with(|input, id, control| {
-                use crate::inspection_package::CanaryPackage;
-                // Build-authorized inputs only. The browser and process runtime
-                // environment cannot override either helper root or digest.
-                let root = option_env!("SHIRUSHI_DEV_INSPECTION_ROOT");
+                // OS executable location is the only root authority. Digest is
+                // independently embedded at compilation, never read from runtime
+                // environment or inferred from the sibling manifest.
                 let digest = option_env!("SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256");
-                let (Some(root), Some(digest)) = (root, digest) else {
+                let Some(digest) = digest else {
                     return Err(ServiceFailure::ServiceUnavailable);
                 };
-                let package = CanaryPackage::preflight(Path::new(root), digest)
-                    .map_err(|_| ServiceFailure::ServiceUnavailable)?;
+                let executable =
+                    std::env::current_exe().map_err(|_| ServiceFailure::ServiceUnavailable)?;
+                let package = resolve_development_package(&executable, digest)?;
                 let mut report = crate::inspection_supervisor::inspect(
                     &package.configuration(),
                     input,

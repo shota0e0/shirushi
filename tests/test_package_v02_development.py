@@ -92,6 +92,47 @@ class AssemblyTests(unittest.TestCase):
         self.assertEqual(raw, package._canonical(manifest))
         self.assertEqual(record["files"][package.MANIFEST]["sha256"], sha(raw))
 
+    def test_prebuild_preparation_raw_bytes_equal_packaged_manifest(self) -> None:
+        raw = package.prepare_manifest(self.helper)
+        frozen_digest = sha(raw)
+        self.assemble()
+        self.assertEqual((self.output / package.MANIFEST).read_bytes(), raw)
+        self.assertEqual(sha((self.output / package.MANIFEST).read_bytes()), frozen_digest)
+        self.assertFalse(raw.endswith(b"\n"))
+
+    def test_helper_only_preparation_needs_no_desktop_and_cli_emits_exact_bytes(self) -> None:
+        self.desktop.unlink()
+        output, error = io.StringIO(), io.StringIO()
+        output.buffer = io.BytesIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            self.assertEqual(package.main(["prepare-manifest", "--helper", str(self.helper)]), 0)
+        raw = output.buffer.getvalue()
+        self.assertEqual(raw, package.prepare_manifest(self.helper))
+        self.assertFalse(raw.endswith(b"\n"))
+        self.assertIn("DEVELOPMENT_MANIFEST_SHA256: " + sha(raw), error.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_helper_preparation_rejects_wrong_basename_architecture_and_directory(self) -> None:
+        wrong = self.inputs / "other.exe"
+        wrong.write_bytes(self.helper.read_bytes())
+        self.rejected(lambda: package.prepare_manifest(wrong), "SOURCE_BASENAME_INVALID")
+        invalid = bytearray(synthetic_pe(3))
+        struct.pack_into("<H", invalid, 132, 0x14c)
+        self.helper.write_bytes(invalid)
+        self.rejected(lambda: package.prepare_manifest(self.helper), "PE_IDENTITY_INVALID")
+        self.helper.unlink()
+        self.helper.mkdir()
+        self.rejected(lambda: package.prepare_manifest(self.helper), "PATH_TYPE_INVALID")
+
+    def test_helper_preparation_detects_mutation_during_serialization(self) -> None:
+        original = package._helper_manifest
+        def mutate(size, digest):
+            raw = original(size, digest)
+            self.helper.write_bytes(synthetic_pe(3, 99))
+            return raw
+        with mock.patch.object(package, "_helper_manifest", side_effect=mutate):
+            self.rejected(lambda: package.prepare_manifest(self.helper), "SOURCE_CHANGED")
+
     def test_missing_desktop(self) -> None:
         self.desktop.unlink()
         self.rejected(self.assemble, "PATH_UNAVAILABLE")
