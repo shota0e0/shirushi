@@ -7,6 +7,9 @@ on:
       - tools/f3a-rust-sdk-parity/**
       - docs/development/f3a-rust-sdk-parity*
       - .github/workflows/f3a-rust-sdk-parity.yml
+      - desktop/src/limited_inspection.rs
+      - desktop/src/lib.rs
+      - desktop/tests/limited_inspection.rs
   workflow_dispatch:
     inputs:
       real_helper_fixed_path_canary:
@@ -267,7 +270,7 @@ jobs:
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'WORKER_TERMINATION_WAIT_REQUIRED: OPEN; not changed in this validation slice', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python used only by existing BridgeHost regression fixtures; no inspection fallback', 'Package/installer assembly: NOT RUN; ephemeral helper test input only', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python used only by existing BridgeHost regression fixtures; no inspection fallback', 'Package/installer assembly: NOT RUN; ephemeral helper test input only', 'ARTIFACT_UPLOAD_COUNT: 0; no uploaded EXE/PDB/log/JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'ARTIFACT_UPLOAD_COUNT: 0'
           }
 

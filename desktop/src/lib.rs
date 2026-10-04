@@ -132,7 +132,9 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 app.state::<BridgeRuntime>().shutdown();
-                app.state::<limited_inspection::LimitedInspectionRuntime>().shutdown();
+                let result = app.state::<limited_inspection::LimitedInspectionRuntime>()
+                    .shutdown_and_wait(limited_inspection::SHUTDOWN_WAIT_BOUND);
+                eprintln!("Shirushi development inspection shutdown: {}", result.code());
             }
         });
 }

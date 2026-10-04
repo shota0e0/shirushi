@@ -4,7 +4,7 @@
 #![cfg(all(windows, debug_assertions, shirushi_dev_limited_inspection_canary))]
 use sha2::{Digest, Sha256};
 use shirushi_desktop::limited_inspection::{
-    InspectionRequest, LimitedInspectionRuntime, OPERATION,
+    InspectionRequest, LimitedInspectionRuntime, ShutdownWaitResult, OPERATION, SHUTDOWN_WAIT_BOUND,
 };
 use std::{fs, path::PathBuf};
 
@@ -55,7 +55,14 @@ fn application_dispatch_fixture_success_cleanup_and_sequential_repetition() {
         // Application success is only published after supervisor reap/Job-zero.
         assert_eq!(fs::read(&input).unwrap(), before);
     }
-    runtime.shutdown();
+    assert_eq!(
+        runtime.shutdown_and_wait(SHUTDOWN_WAIT_BOUND),
+        ShutdownWaitResult::Complete
+    );
+    assert_eq!(
+        runtime.shutdown_and_wait(SHUTDOWN_WAIT_BOUND),
+        ShutdownWaitResult::Complete
+    );
     assert!(runtime.inspect(request(input)).is_err());
 }
 
@@ -81,5 +88,9 @@ fn application_dispatch_failure_then_success_preserves_source() {
             .inspect(request(fixture("valid_shirushi.png")))
             .unwrap()["result"],
         "LIMITED_INSPECTION"
+    );
+    assert_eq!(
+        runtime.shutdown_and_wait(SHUTDOWN_WAIT_BOUND),
+        ShutdownWaitResult::Complete
     );
 }
