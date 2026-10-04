@@ -20,6 +20,7 @@ const ASSET_ALLOWLIST: &[(&str, &str)] = &[
     ("desktop/presentation.js", "desktop/presentation.js"),
     ("desktop/i18n.js", "desktop/i18n.js"),
     ("desktop/controller.js", "desktop/controller.js"),
+    ("desktop/limited-inspection.js", "desktop/limited-inspection.js"),
     ("personal-mark-v2/index.js", "personal-mark-v2/index.js"),
     ("personal-mark-v2/contract.js", "personal-mark-v2/contract.js"),
     ("personal-mark-v2/parser.js", "personal-mark-v2/parser.js"),
