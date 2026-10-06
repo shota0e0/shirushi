@@ -893,7 +893,15 @@ mod windows {
     ) -> ProcessReport {
         let raw = match helper_protocol::encode_request(id, input) {
             Ok(v) => v,
-            Err(e) => return failed(e),
+            Err(e) => {
+                let _lease = match control.claim(id) {
+                    Ok(lease) => lease,
+                    Err(claim_error) => return failed(claim_error),
+                };
+                // Drop terminalizes only this claimed identity/epoch, even when
+                // preflight fails before any child starts.
+                return failed(e);
+            }
         };
         invoke(configuration, &raw, id, control, deadline, cleanup_bound)
     }
