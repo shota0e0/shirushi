@@ -101,6 +101,24 @@ fn staged(format: image::ImageFormat, ext: &str, m: Value) {
             Cursor::new(signed),
         )
         .unwrap();
+    // Metadata Add edits an existing image. The SDK must emit a valid opened
+    // action, not claim that Shirushi created the source artwork.
+    assert!(matches!(
+        reader.validation_state(),
+        c2pa::ValidationState::Valid
+    ));
+    let actions = reader
+        .active_manifest()
+        .unwrap()
+        .assertions()
+        .iter()
+        .filter(|a| a.label().starts_with("c2pa.actions"))
+        .collect::<Vec<_>>();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].value().unwrap()["actions"][0]["action"],
+        "c2pa.opened"
+    );
     let assertion = reader
         .active_manifest()
         .unwrap()

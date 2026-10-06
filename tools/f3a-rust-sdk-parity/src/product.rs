@@ -379,6 +379,13 @@ fn sign(bytes: &[u8], format: image::ImageFormat, mark: &Value) -> Result<Vec<u8
     )
     .map_err(|_| Error::InternalSdkFailure)?;
     let mut builder = Builder::from_context(context()?).with_definition(json!({"title":"Shirushi development metadata","claim_generator_info":[{"name":"Shirushi development","version":"0.2"}]})).map_err(|_| Error::InternalSdkFailure)?;
+    // SDK v2 claims require an initial opened/created action. Metadata Add
+    // edits an existing image, it does not claim to create its pixels. The
+    // supported Edit intent adds the source parent ingredient and a signed
+    // c2pa.opened action referring to it. Without an intent, SDK defaults add
+    // neither, and the unchanged Reader integrity checks correctly reject the
+    // resulting assertion.action.malformed claim.
+    builder.set_intent(c2pa::BuilderIntent::Edit);
     builder
         .add_assertion("cawg.training-mining", &crate::expected_rights())
         .map_err(|_| Error::InternalSdkFailure)?;
