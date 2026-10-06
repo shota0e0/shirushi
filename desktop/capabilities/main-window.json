@@ -7,6 +7,9 @@
   "permissions": [
     "allow-bridge-get-capabilities",
     "allow-bridge-load-personal-mark",
-    "allow-bridge-inspect-limited"
+    "allow-bridge-inspect-limited",
+    "allow-bridge-select-image",
+    "allow-bridge-read-image",
+    "allow-bridge-product-operation"
   ]
 }

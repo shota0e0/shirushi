@@ -10,7 +10,7 @@ use std::{
 };
 
 pub const PROTOCOL_VERSION: u64 = 1;
-pub const MAX_REQUEST_BYTES: usize = 8192;
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_STDERR_BYTES: usize = 4096;
 
@@ -108,6 +108,32 @@ pub fn encode_request(id: RequestIdentity, path: &Path) -> Result<Vec<u8>, Servi
     parse_request(&raw)?;
     Ok(raw)
 }
+
+pub fn encode_product_request(
+    id: RequestIdentity,
+    input: &Path,
+    add: Option<(&Path, &Path, &Value)>,
+) -> Result<Vec<u8>, ServiceFailure> {
+    let input = input.to_str().ok_or(ServiceFailure::InputUnavailable)?;
+    if input.is_empty() || input.len() > 4096 || input.contains('\0') {
+        return Err(ServiceFailure::InputUnavailable);
+    }
+    let mut value = json!({"protocolVersion":1,"operation":"limited_inspect",
+        "request":id.request,"generation":id.generation,"inputLocator":input});
+    if let Some((output, stage, mark)) = add {
+        crate::product_contract::validate_personal_mark(mark)
+            .map_err(|_| ServiceFailure::ResultInvalid)?;
+        value["operation"] = json!("add");
+        value["outputLocator"] = json!(output.to_str().ok_or(ServiceFailure::InputUnavailable)?);
+        value["stagingLocator"] = json!(stage.to_str().ok_or(ServiceFailure::InputUnavailable)?);
+        value["personalMark"] = mark.clone();
+    }
+    let raw = serde_json::to_vec(&value).map_err(|_| ServiceFailure::ResultInvalid)?;
+    if raw.len() > MAX_REQUEST_BYTES {
+        return Err(ServiceFailure::ResourceLimitExceeded);
+    }
+    Ok(raw)
+}
 fn failure(code: &str) -> Option<ServiceFailure> {
     use ServiceFailure::*;
     [
@@ -157,7 +183,11 @@ pub fn parse_response(
                 ],
             ) =>
         {
-            if v["result"] != expected_limited_wire() {
+            if v["result"] != expected_limited_wire()
+                && crate::product_contract::validate_product_result(&v["result"], "limited_inspect")
+                    .is_err()
+                && crate::product_contract::validate_product_result(&v["result"], "add").is_err()
+            {
                 return Err(ServiceFailure::ResultInvalid);
             }
             Ok(HelperOutcome::Success(v["result"].clone()))
@@ -182,6 +212,19 @@ pub fn parse_response(
             ))
         }
         _ => Err(ServiceFailure::ResultInvalid),
+    }
+}
+
+pub(crate) fn response_matches_request(raw: &[u8], value: &Value) -> bool {
+    let Ok(request) = parse(raw, MAX_REQUEST_BYTES) else {
+        return false;
+    };
+    match request["operation"].as_str() {
+        Some("INSPECT_LIMITED") => *value == expected_limited_wire(),
+        Some(operation @ ("add" | "limited_inspect")) => {
+            crate::product_contract::validate_product_result(value, operation).is_ok()
+        }
+        _ => false,
     }
 }
 pub fn read_bounded(reader: &mut impl Read, cap: usize) -> Result<Vec<u8>, ServiceFailure> {

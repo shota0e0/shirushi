@@ -3,7 +3,7 @@ export const PREVIEW_PROVENANCE = "f1-approved-isolated-dev-fixture";
 export function previewProfileFixture() {
   return {
     version: 1,
-    mode: "typed",
+    mode: "handwritten",
     typed: "Niki",
     handwritten: {
       coordinateSpace: { width: 480, height: 220 },
@@ -24,7 +24,7 @@ const handwritten = {
   ],
 };
 
-export function verificationFixture(mode = "typed") {
+export function verificationFixture(mode = "handwritten") {
   if (!["typed", "handwritten"].includes(mode)) throw new Error("INVALID_PREVIEW_FIXTURE");
   return {
     provenance: PREVIEW_PROVENANCE,

@@ -6,6 +6,8 @@ import { PREVIEW_PROVENANCE, previewProfileFixture, verificationFixture } from "
 const wait = () => new Promise((resolve) => setTimeout(resolve, 140));
 
 export class DevPreviewAdapter extends BrowserFoundationAdapter {
+  // Preview-only target state, never evidence of embedding in the source file.
+  #appliedMarks = new Map();
   capabilities = freezeCapabilities({
     coreAdd: false,
     coreVerify: false,
@@ -20,11 +22,20 @@ export class DevPreviewAdapter extends BrowserFoundationAdapter {
     super(previewProfileFixture());
   }
 
+  releaseImage() {
+    this.#appliedMarks.clear();
+    super.releaseImage();
+  }
+
   async addMark(request) {
-    await wait();
+    const targetReference = request?.targetReference;
     const mark = sanitizeMark(request?.mark);
-    if (!mark) return { status: "ERROR", reason: "invalid_preview_mark" };
-    return { status: "PREVIEW_ADD", source: "dev-preview", provenance: PREVIEW_PROVENANCE, mark: clone(mark) };
+    if (typeof targetReference !== "string" || !targetReference || !mark) {
+      return { status: "ERROR", reason: "invalid_preview_mark" };
+    }
+    await wait();
+    this.#appliedMarks.set(targetReference, clone(mark));
+    return { status: "PREVIEW_ADD", source: "dev-preview", provenance: PREVIEW_PROVENANCE, targetReference, mark: clone(mark) };
   }
 
   async verifyFileMark(request) {
@@ -34,13 +45,19 @@ export class DevPreviewAdapter extends BrowserFoundationAdapter {
       return { status: "ERROR", reason: "invalid_verify_request_shape" };
     }
     await wait();
-    const fixture = verificationFixture(request.options?.fixtureMode || "typed");
+    const applied = this.#appliedMarks.get(request.targetReference);
+    // Only this explicit test target is a known marked fixture. A selected
+    // local image / selector value never implies a mark exists in that image.
+    const fixture = request.targetReference === "dev-target-fixture"
+      ? verificationFixture(request.options?.fixtureMode ?? "handwritten") : null;
+    const mark = applied ?? fixture?.mark;
+    if (!mark) return { status: "PREVIEW_UNMARKED", source: "dev-preview", targetReference: request.targetReference };
     return {
       status: "PREVIEW_VERIFY",
-      source: "dev-preview-fixture",
-      provenance: fixture.provenance,
+      source: applied ? "dev-preview-applied" : "dev-preview-fixture",
+      provenance: PREVIEW_PROVENANCE,
       targetReference: request.targetReference,
-      mark: sanitizeMark(fixture.mark),
+      mark: sanitizeMark(mark),
     };
   }
 }

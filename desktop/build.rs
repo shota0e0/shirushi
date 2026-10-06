@@ -9,7 +9,12 @@ fn main() {
             "bridge_get_capabilities",
             "bridge_load_personal_mark",
             "bridge_inspect_limited",
+            "bridge_select_image",
+            "bridge_read_image",
+            "bridge_product_operation",
         ]))
-        .windows_attributes(tauri_build::WindowsAttributes::new().window_icon_path("../assets/app_icon.ico"));
+        .windows_attributes(
+            tauri_build::WindowsAttributes::new().window_icon_path("../assets/app_icon.ico"),
+        );
     tauri_build::try_build(attributes).expect("failed to prepare the Tauri application");
 }

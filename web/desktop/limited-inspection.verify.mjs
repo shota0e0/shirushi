@@ -118,5 +118,5 @@ const stage = await readFile(new URL("../../desktop/src/asset_stage.rs", import.
 const acl = JSON.parse(await readFile(new URL("../../desktop/capabilities/main-window.json", import.meta.url), "utf8"));
 check(lib.includes("bridge_inspect_limited") && build.includes('"bridge_inspect_limited"')
   && acl.permissions.includes("allow-bridge-inspect-limited"), "native command + local-window ACL registered");
-check(stage.includes('("desktop/limited-inspection.js", "desktop/limited-inspection.js")'), "only focused runtime module staged");
+check(/\(\s*"desktop\/limited-inspection\.js",\s*"desktop\/limited-inspection\.js",?\s*\)/.test(stage), "focused legacy runtime module remains staged (format independent)");
 console.log(`PASS Limited Inspection Web/controller/presentation: ${checks} checks`);

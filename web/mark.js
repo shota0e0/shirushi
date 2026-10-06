@@ -4,7 +4,7 @@ export const DRAW_HEIGHT = 220;
 export function blankPersonalMarkDraft() {
   return {
     version: 1,
-    mode: "typed",
+    mode: "handwritten",
     typed: "",
     handwritten: {
       coordinateSpace: { width: DRAW_WIDTH, height: DRAW_HEIGHT },

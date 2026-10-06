@@ -1,5 +1,5 @@
 /**
- * @typedef {"SUCCESS"|"VERIFIED"|"PREVIEW_ADD"|"PREVIEW_VERIFY"|"UNSUPPORTED"|"ERROR"} OperationStatus
+ * @typedef {"SUCCESS"|"VERIFIED"|"PREVIEW_ADD"|"PREVIEW_VERIFY"|"PREVIEW_UNMARKED"|"UNSUPPORTED"|"ERROR"} OperationStatus
  * @typedef {{coreAdd:boolean, coreVerify:boolean, coreReadback:boolean, localImagePreview:boolean, sessionMarkEdit:boolean, previewAddMotion:boolean, previewVerifyMotion:boolean}} Capabilities
  * @typedef {{status:OperationStatus, reason?:string, source?:string, mark?:PersonalMark, provenance?:string}} OperationResult
  * @typedef {{width:number,height:number}} CoordinateSpace

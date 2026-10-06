@@ -13,26 +13,57 @@ const ASSET_ALLOWLIST: &[(&str, &str)] = &[
     ("i18n.js", "i18n.js"),
     ("mark.js", "mark.js"),
     ("motion.js", "motion.js"),
-    ("adapters/browser-foundation-adapter.js", "adapters/browser-foundation-adapter.js"),
+    (
+        "adapters/browser-foundation-adapter.js",
+        "adapters/browser-foundation-adapter.js",
+    ),
     ("adapters/desktop-adapter.js", "adapters/desktop-adapter.js"),
     ("desktop/transport.js", "desktop/transport.js"),
+    ("desktop/product-flow.js", "desktop/product-flow.js"),
     ("desktop/contract.js", "desktop/contract.js"),
     ("desktop/presentation.js", "desktop/presentation.js"),
     ("desktop/i18n.js", "desktop/i18n.js"),
     ("desktop/controller.js", "desktop/controller.js"),
-    ("desktop/limited-inspection.js", "desktop/limited-inspection.js"),
+    (
+        "desktop/limited-inspection.js",
+        "desktop/limited-inspection.js",
+    ),
     ("personal-mark-v2/index.js", "personal-mark-v2/index.js"),
-    ("personal-mark-v2/contract.js", "personal-mark-v2/contract.js"),
+    (
+        "personal-mark-v2/contract.js",
+        "personal-mark-v2/contract.js",
+    ),
     ("personal-mark-v2/parser.js", "personal-mark-v2/parser.js"),
     ("personal-mark-v2/errors.js", "personal-mark-v2/errors.js"),
-    ("personal-mark-v2/profile-registry.js", "personal-mark-v2/profile-registry.js"),
-    ("personal-mark-v2/typed-save.js", "personal-mark-v2/typed-save.js"),
-    ("personal-mark-v2/geometry.js", "personal-mark-v2/geometry.js"),
-    ("personal-mark-v2/embedding.js", "personal-mark-v2/embedding.js"),
+    (
+        "personal-mark-v2/profile-registry.js",
+        "personal-mark-v2/profile-registry.js",
+    ),
+    (
+        "personal-mark-v2/typed-save.js",
+        "personal-mark-v2/typed-save.js",
+    ),
+    (
+        "personal-mark-v2/geometry.js",
+        "personal-mark-v2/geometry.js",
+    ),
+    (
+        "personal-mark-v2/embedding.js",
+        "personal-mark-v2/embedding.js",
+    ),
     ("personal-mark-v2/legacy.js", "personal-mark-v2/legacy.js"),
-    ("personal-mark-v2/unicode16.js", "personal-mark-v2/unicode16.js"),
-    ("personal-mark-v2/unicode16-data.js", "personal-mark-v2/unicode16-data.js"),
-    ("personal-mark-v2/Unicode-LICENSE.txt", "personal-mark-v2/Unicode-LICENSE.txt"),
+    (
+        "personal-mark-v2/unicode16.js",
+        "personal-mark-v2/unicode16.js",
+    ),
+    (
+        "personal-mark-v2/unicode16-data.js",
+        "personal-mark-v2/unicode16-data.js",
+    ),
+    (
+        "personal-mark-v2/Unicode-LICENSE.txt",
+        "personal-mark-v2/Unicode-LICENSE.txt",
+    ),
 ];
 
 pub fn stage_desktop_assets() -> io::Result<()> {
@@ -42,7 +73,10 @@ pub fn stage_desktop_assets() -> io::Result<()> {
 
 fn stage_from(source_root: &Path, destination_root: &Path) -> io::Result<()> {
     let generated_parent = destination_root.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "desktop staging path has no parent")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "desktop staging path has no parent",
+        )
     })?;
     fs::create_dir_all(generated_parent)?;
     let expected_parent = fs::canonicalize(generated_parent)?;
@@ -78,7 +112,10 @@ fn stage_from(source_root: &Path, destination_root: &Path) -> io::Result<()> {
         let metadata = fs::metadata(&source).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("required desktop asset {} is unavailable: {error}", source.display()),
+                format!(
+                    "required desktop asset {} is unavailable: {error}",
+                    source.display()
+                ),
             )
         })?;
         if !metadata.is_file() {

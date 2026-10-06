@@ -227,7 +227,7 @@ fn transport_report(report: ProcessReport) -> Value {
     }
 }
 #[cfg(all(windows, debug_assertions))]
-fn resolve_development_package(
+pub(crate) fn resolve_development_package(
     executable: &Path,
     trusted_manifest_digest: &str,
 ) -> Result<crate::inspection_package::CanaryPackage, ServiceFailure> {
@@ -268,6 +268,32 @@ pub fn development_package_preflight_for_canary(
 }
 
 impl InspectionInvocation {
+    /// Product operations share the same reservation, compiled helper identity,
+    /// supervisor and shutdown notification as the existing inspection path.
+    pub(crate) fn run_product(self, mark: Option<Value>, expected: crate::ExpectedSource) -> Value {
+        #[cfg(all(windows, debug_assertions))]
+        {
+            let result = crate::product_operation::run(
+                &self.input,
+                self.id,
+                &self.control,
+                mark.as_ref(),
+                &expected,
+            );
+            result.unwrap_or_else(|error| {
+                if mark.is_some() {
+                    json!({"operation":"add","result":"ADD_FAILED","errorCode":error.code()})
+                } else {
+                    failed(error)
+                }
+            })
+        }
+        #[cfg(not(all(windows, debug_assertions)))]
+        {
+            let _ = (mark, expected);
+            failed(ServiceFailure::ServiceUnavailable)
+        }
+    }
     pub(crate) fn run(self) -> Value {
         #[cfg(all(windows, debug_assertions))]
         {
@@ -325,11 +351,11 @@ impl InspectionInvocation {
 }
 
 #[cfg(all(windows, debug_assertions))]
-struct InputGuard {
+pub(crate) struct InputGuard {
     _files: Vec<std::fs::File>,
 }
 #[cfg(all(windows, debug_assertions))]
-fn pin_input(input: &Path) -> Result<InputGuard, ServiceFailure> {
+pub(crate) fn pin_input(input: &Path) -> Result<InputGuard, ServiceFailure> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::path::{Component, Prefix};
@@ -337,11 +363,11 @@ fn pin_input(input: &Path) -> Result<InputGuard, ServiceFailure> {
     extern "system" {
         fn GetDriveTypeW(root: *const u16) -> u32;
     }
-    if input
-        .extension()
-        .and_then(|v| v.to_str())
-        .is_none_or(|v| !v.eq_ignore_ascii_case("png"))
-    {
+    if input.extension().and_then(|v| v.to_str()).is_none_or(|v| {
+        !["png", "jpg", "jpeg"]
+            .iter()
+            .any(|e| v.eq_ignore_ascii_case(e))
+    }) {
         return Err(ServiceFailure::UnsupportedFormat);
     }
     // Development input stays local-drive/no-ADS/no-reparse; the helper retains
@@ -599,7 +625,7 @@ mod tests {
                 "C:/shirushi-definitely-absent-9b0c239c.png",
                 "INPUT_UNAVAILABLE",
             ),
-            ("C:/unsupported.jpg", "UNSUPPORTED_FORMAT"),
+            ("C:/unsupported.webp", "UNSUPPORTED_FORMAT"),
         ] {
             let lease = runtime
                 .reserve(InspectionRequest {

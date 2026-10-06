@@ -1,22 +1,20 @@
 import { bootstrapShirushi } from "./bootstrap.js";
 import { DesktopAdapter } from "./adapters/desktop-adapter.js";
 import { createDesktopTransport } from "./desktop/transport.js";
-import { createBridgeController } from "./desktop/controller.js";
-import { createDesktopPresentation } from "./desktop/presentation.js";
-import { createLimitedController, createLimitedPresentation } from "./desktop/limited-inspection.js";
 
 const transport = createDesktopTransport(window);
-const adapter = new DesktopAdapter(transport);
-let app;
-const controller = createBridgeController(adapter, { onChange: () => app?.refreshPresentation() });
-const markPresentation = createDesktopPresentation(() => controller.state, () => controller.refresh());
-const limited = createLimitedController(transport, { onChange: () => app?.refreshPresentation() });
-const limitedPresentation = createLimitedPresentation(() => limited.state, (inputPath) => limited.inspect(inputPath));
+const adapter = new DesktopAdapter(transport, { productFlow:true });
 const presentation = {
-  render(context) { markPresentation.render(context); limitedPresentation.render(context); },
-  destroy() { markPresentation.destroy(); limitedPresentation.destroy(); },
+  render({ elements, locale }) {
+    const note = locale === "ja"
+      ? "Development · Rust Add / Limited Inspection · INCOMPLETE · TrustMark NOT_CHECKED · 元画像は変更しません"
+      : "Development · Rust Add / Limited Inspection · INCOMPLETE · TrustMark NOT_CHECKED · source preserved";
+    elements.devBanner.hidden = false;
+    elements.devBanner.textContent = "Shirushi DEVELOPMENT";
+    elements.capabilityNote.textContent = note;
+    elements.root.querySelector("footer").textContent = note;
+    elements.detailsDialog.querySelector(".details-body").textContent = note;
+  },
 };
-app = bootstrapShirushi({ root: document.querySelector("#app"), adapter, presentation });
-// No profile is put through session sanitization or rendered with fallback fonts.
-void controller.refresh();
-window.addEventListener("beforeunload", () => { controller.dispose(); limited.dispose(); app.destroy(); }, { once: true });
+const app = bootstrapShirushi({ root: document.querySelector("#app"), adapter, presentation });
+window.addEventListener("beforeunload", () => app.destroy(), { once: true });

@@ -83,8 +83,8 @@ jobs:
           "LIMITED_NATIVE_INDEX_SHA=$indexSha" >> $env:GITHUB_ENV
           "index_sha=$indexSha" >> $env:GITHUB_OUTPUT
           $locks = @{
-            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
-            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+            'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
           }
           foreach ($path in $locks.Keys) {
             $oid = (git rev-parse "HEAD:$path").Trim()
@@ -137,8 +137,8 @@ jobs:
           cargo +1.88.0 fetch --locked --manifest-path desktop/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $locks = @{
-            'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
-            'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+            'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+            'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
           }
           foreach ($path in $locks.Keys) {
             if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $locks[$path]) { throw 'POST_FETCH_LOCK_CHANGED' }
@@ -166,9 +166,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $active = @($metadata.packages | Where-Object { $tree -Match ('^'+[regex]::Escape($_.name+' v'+$_.version)+'(?: |$)') })
           $scripts = @($active | Where-Object { @($_.targets | Where-Object kind -Contains 'custom-build').Count })
-          if ($tree.Count -ne 240 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'HELPER_FOOTPRINT_MISMATCH' }
+          if ($tree.Count -ne 248 -or $scripts.Count -ne 26 -or @($active | Where-Object links).Count) { throw 'HELPER_FOOTPRINT_MISMATCH' }
           if (@($active | Where-Object name -Match '^(reqwest|ureq|wstd|openssl|openssl-sys|ring|aws-lc-sys|cc|sha2-asm)$').Count) { throw 'UNAPPROVED_RUNTIME_BACKEND' }
-          'HELPER_FEATURES: c2pa0.85.0; rust_native_crypto only; packages240/build scripts26'
+          'HELPER_FEATURES: c2pa0.85.0; rust_native_crypto only; packages248/build scripts26; bounded PNG/JPEG image decoder addition'
           cargo +1.88.0 build --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --bin shirushi-inspection-helper
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml -- --nocapture
@@ -245,6 +245,37 @@ jobs:
           $control = [IO.File]::ReadAllText($log)
           if ($control -notmatch 'test result: ok\. 6 passed; 0 failed; 1 ignored;' -or $control -notmatch 'application_dispatch_fixture_success_cleanup_and_sequential_repetition' -or $control -notmatch 'application_dispatch_failure_then_success_preserves_source' -or $control -notmatch 'development_resolver_raw_manifest_and_helper_tamper_fail_closed') { throw 'LIMITED_NATIVE_TESTS_NOT_EXECUTED' }
           'LIMITED_NATIVE_APPLICATION_TESTS: 2 dispatch + 4 focused resolver passed; 1 explicit post-assembly test pending'
+
+      - name: Validate real Product Flow controller Add and limited inspection roundtrips
+        id: product_native
+        shell: pwsh
+        env:
+          RUSTFLAGS: --cfg shirushi_real_helper_canary --cfg shirushi_dev_limited_inspection_canary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:RUNNER_TEMP 'product-native-roundtrip.log'
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --lib product_operation::tests::native_controller_png_jpeg_add_inspect_roundtrip_and_fail_closed_publication -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $nativeExit = $LASTEXITCODE
+          if ($nativeExit -ne 0) { exit $nativeExit }
+          if ((Get-Item -LiteralPath $log).Length -gt 2097152) { throw 'PRODUCT_NATIVE_CONTROL_TOO_LARGE' }
+          $control = [IO.File]::ReadAllText($log)
+          if ($control -notmatch 'test result: ok\. 1 passed; 0 failed;' -or $control -notmatch 'PRODUCT_NATIVE_CONTROLLER_ROUNDTRIP: format=png' -or $control -notmatch 'PRODUCT_NATIVE_CONTROLLER_ROUNDTRIP: format=jpg' -or $control -notmatch 'reaped=true jobActiveProcesses=Some\(0\)') { throw 'PRODUCT_NATIVE_ROUNDTRIPS_NOT_EXECUTED' }
+          'PRODUCT_NATIVE_ROUNDTRIP: PNG_AND_JPEG_PASS; NO_SOURCE_OVERWRITE; PERSONAL_MARK_METADATA_ONLY; LIMITED_INCOMPLETE'
+
+      - name: Validate current Product Flow Web contracts without native execution
+        id: product_web
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($script in @('web/verify.mjs','web/desktop/verify.mjs','web/desktop/inspection.verify.mjs','web/desktop/limited-inspection.verify.mjs','web/desktop/product-flow.verify.mjs','web/personal-mark-v2/verify.mjs','web/personal-mark-v2/unicode16.verify.mjs','web-canary/verify.mjs')) {
+            node $script
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & .\.venv-py312\Scripts\python.exe -B -m unittest tests.test_inspection_application
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'PRODUCT_WEB_REGRESSIONS: PASS; SYNTHETIC_TRANSPORT_NOT_NATIVE_SMOKE; EXISTING_PYTHON_REGRESSIONS_ONLY'
 
       - name: Assemble and independently audit actual same-job development bytes
         id: limited_package
@@ -603,8 +634,8 @@ jobs:
             $head = git rev-parse HEAD
             if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'FINAL_SOURCE_HEAD_CHANGED' }
             $locks = @{
-              'desktop/Cargo.lock' = 'd628a85387556da8542551fad508f0f7bd4b92f570e49e7b035f3f765ddc5069'
-              'tools/f3a-rust-sdk-parity/Cargo.lock' = 'a40f49659e9329689de6aa1bf581875a9e2b542e5d0faca6c33f4964fe03f3a8'
+              'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+              'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
             }
             foreach ($path in $locks.Keys) {
               if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $locks[$path]) { throw 'FINAL_LOCK_CHANGED' }
@@ -619,6 +650,8 @@ jobs:
             $required = @('${{ steps.limited_preflight.outcome }}','${{ steps.limited_fetch.outcome }}','${{ steps.limited_helper.outcome }}','${{ steps.limited_input.outcome }}','${{ steps.limited_desktop.outcome }}','${{ steps.limited_real.outcome }}','${{ steps.limited_package.outcome }}','${{ steps.limited_binding.outcome }}')
             if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'LIMITED_INSPECTION_NATIVE_CI_PRECEDING_STEP_FAILED' }
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
+            if ('${{ steps.product_native.outcome }}' -ne 'success' -or '${{ steps.product_web.outcome }}' -ne 'success') { throw 'PRODUCT_FLOW_VALIDATION_FAILED' }
+            'V02_RUST_PRODUCT_HELPER_EXTENSION_PASS'
             'V02_DEVELOPMENT_PACKAGE_ASSEMBLY_PASS'
             'V02_DEVELOPMENT_PACKAGE_RUNTIME_BINDING_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY

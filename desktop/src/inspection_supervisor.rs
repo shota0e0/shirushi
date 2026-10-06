@@ -88,11 +88,95 @@ impl Control {
     pub fn has_started(&self) -> bool {
         self.0.lock().map(|c| c.started).unwrap_or(false)
     }
+    /// A cancelled/stale controller may not publish a helper's staged Add.
+    /// Hold the existing control lock through the no-clobber publication.
+    pub(crate) fn publish_if_current<T>(
+        &self,
+        id: RequestIdentity,
+        publish: impl FnOnce() -> Result<T, ServiceFailure>,
+    ) -> Result<T, ServiceFailure> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| ServiceFailure::ServiceUnavailable)?;
+        if state.unavailable {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        if state.cancelled {
+            return Err(ServiceFailure::Cancelled);
+        }
+        if state.current != id || !state.terminal || state.running {
+            return Err(ServiceFailure::ResultInvalid);
+        }
+        publish()
+    }
 }
 struct RequestLease<'a> {
     control: &'a Control,
     identity: RequestIdentity,
     epoch: u64,
+}
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn publication_requires_completed_current_uncancelled_lease() {
+        let id = RequestIdentity {
+            request: 1,
+            generation: 1,
+        };
+        let control = Control::new(id);
+        let called = Cell::new(false);
+        assert_eq!(
+            control.publish_if_current(id, || {
+                called.set(true);
+                Ok(())
+            }),
+            Err(ServiceFailure::ResultInvalid)
+        );
+        let lease = control.claim(id).unwrap();
+        assert_eq!(
+            control.publish_if_current(id, || {
+                called.set(true);
+                Ok(())
+            }),
+            Err(ServiceFailure::ResultInvalid)
+        );
+        assert!(!called.get());
+        drop(lease);
+        assert_eq!(
+            control.publish_if_current(id, || {
+                called.set(true);
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert!(called.get());
+        called.set(false);
+        control.cancel();
+        assert_eq!(
+            control.publish_if_current(id, || {
+                called.set(true);
+                Ok(())
+            }),
+            Err(ServiceFailure::Cancelled)
+        );
+        assert!(!called.get());
+        control.set_current(RequestIdentity {
+            request: 2,
+            generation: 1,
+        });
+        assert_eq!(
+            control.publish_if_current(id, || {
+                called.set(true);
+                Ok(())
+            }),
+            Err(ServiceFailure::ResultInvalid)
+        );
+        assert!(!called.get());
+    }
 }
 impl Drop for RequestLease<'_> {
     fn drop(&mut self) {
@@ -767,12 +851,20 @@ mod windows {
         let candidate = if let Some(e) = stop.or(invalidated) {
             HelperOutcome::Failure(e)
         } else {
-            helper_protocol::parse_response(
+            let outcome = helper_protocol::parse_response(
                 output.as_deref().unwrap_or(&[]),
                 id,
                 exit.unwrap_or(-1),
             )
-            .unwrap_or_else(HelperOutcome::Failure)
+            .unwrap_or_else(HelperOutcome::Failure);
+            match outcome {
+                HelperOutcome::Success(ref value)
+                    if !helper_protocol::response_matches_request(raw, value) =>
+                {
+                    HelperOutcome::Failure(ServiceFailure::ResultInvalid)
+                }
+                other => other,
+            }
         };
         if let Ok(c) = &mut current {
             if c.current == id && c.epoch == _lease.epoch {
@@ -799,6 +891,22 @@ mod windows {
         deadline: Duration,
         cleanup_bound: Duration,
     ) -> ProcessReport {
+        let raw = match helper_protocol::encode_request(id, input) {
+            Ok(v) => v,
+            Err(e) => return failed(e),
+        };
+        invoke(configuration, &raw, id, control, deadline, cleanup_bound)
+    }
+    /// Same accepted one-shot runner, with a trusted strictly validated product
+    /// request. No alternate executable discovery or second process owner.
+    pub fn invoke(
+        configuration: &FixedExecutable,
+        raw: &[u8],
+        id: RequestIdentity,
+        control: &Control,
+        deadline: Duration,
+        cleanup_bound: Duration,
+    ) -> ProcessReport {
         let lease = match control.claim(id) {
             Ok(lease) => lease,
             Err(e) => return failed(e),
@@ -806,10 +914,6 @@ mod windows {
         if !configuration.executable.is_absolute() {
             return failed(ServiceFailure::ServiceUnavailable);
         }
-        let raw = match helper_protocol::encode_request(id, input) {
-            Ok(v) => v,
-            Err(e) => return failed(e),
-        };
         #[cfg(debug_assertions)]
         if let Some(guard) = &configuration.verified_helper {
             guard.begin();
@@ -817,7 +921,7 @@ mod windows {
         run(
             &mut configuration.command(),
             configuration,
-            &raw,
+            raw,
             id,
             control,
             &lease,
@@ -828,3 +932,5 @@ mod windows {
 }
 #[cfg(windows)]
 pub use windows::inspect;
+#[cfg(windows)]
+pub use windows::invoke;

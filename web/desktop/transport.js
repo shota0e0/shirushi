@@ -12,5 +12,8 @@ export function createDesktopTransport(windowRef) {
     getCapabilities: () => call("bridge_get_capabilities"),
     loadPersonalMark: () => call("bridge_load_personal_mark"),
     inspectLimited: (request) => call("bridge_inspect_limited", { request }),
+    selectImage: () => call("bridge_select_image"),
+    readImage: (inputPath) => call("bridge_read_image", { inputPath }),
+    productOperation: (request) => call("bridge_product_operation", { request }),
   });
 }

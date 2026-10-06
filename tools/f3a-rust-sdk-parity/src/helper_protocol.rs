@@ -14,13 +14,17 @@ use std::{
 };
 
 pub const PROTOCOL_VERSION: u64 = 1;
-pub const MAX_REQUEST_BYTES: usize = 8192;
+pub const MAX_REQUEST_BYTES: usize = crate::product_contract::MAX_PRODUCT_REQUEST_BYTES;
 pub const MAX_RESPONSE_BYTES: usize = crate::MAX_JSON_BYTES;
 pub const MAX_STDERR_BYTES: usize = 4096;
 
 pub struct HelperRequest {
     pub identity: RequestIdentity,
     locator: String,
+    operation: String,
+    output: Option<String>,
+    stage: Option<String>,
+    mark: Option<Value>,
 }
 impl std::fmt::Debug for HelperRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,16 +84,35 @@ fn identity(v: &Value) -> Result<RequestIdentity, ServiceFailure> {
 }
 pub fn parse_request(raw: &[u8]) -> Result<HelperRequest, ServiceFailure> {
     let v = parse(raw, MAX_REQUEST_BYTES)?;
-    if !keys(
-        &v,
-        &[
-            "protocolVersion",
-            "operation",
-            "request",
-            "generation",
-            "inputLocator",
-        ],
-    ) || v["operation"] != "INSPECT_LIMITED"
+    let operation = v["operation"]
+        .as_str()
+        .ok_or(ServiceFailure::ResultInvalid)?;
+    if (operation == "add"
+        && !keys(
+            &v,
+            &[
+                "protocolVersion",
+                "operation",
+                "request",
+                "generation",
+                "inputLocator",
+                "outputLocator",
+                "stagingLocator",
+                "personalMark",
+            ],
+        ))
+        || (operation != "add"
+            && !keys(
+                &v,
+                &[
+                    "protocolVersion",
+                    "operation",
+                    "request",
+                    "generation",
+                    "inputLocator",
+                ],
+            ))
+        || !matches!(operation, "INSPECT_LIMITED" | "limited_inspect" | "add")
     {
         return Err(ServiceFailure::ResultInvalid);
     }
@@ -102,7 +125,91 @@ pub fn parse_request(raw: &[u8]) -> Result<HelperRequest, ServiceFailure> {
     Ok(HelperRequest {
         identity: identity(&v)?,
         locator: locator.to_owned(),
+        operation: operation.to_owned(),
+        output: if operation == "add" {
+            Some(locator_field(&v, "outputLocator")?)
+        } else {
+            None
+        },
+        stage: if operation == "add" {
+            Some(locator_field(&v, "stagingLocator")?)
+        } else {
+            None
+        },
+        mark: if operation == "add" {
+            crate::product_contract::validate_personal_mark(&v["personalMark"])
+                .map_err(|_| ServiceFailure::ResultInvalid)?;
+            Some(v["personalMark"].clone())
+        } else {
+            None
+        },
     })
+}
+fn locator_field(v: &Value, field: &str) -> Result<String, ServiceFailure> {
+    let s = v[field].as_str().ok_or(ServiceFailure::ResultInvalid)?;
+    if s.is_empty() || s.len() > 4096 || s.contains('\0') {
+        return Err(ServiceFailure::ResultInvalid);
+    }
+    Ok(s.to_owned())
+}
+pub fn encode_product_request(
+    id: RequestIdentity,
+    operation: &str,
+    input: &Path,
+    output: Option<&Path>,
+    stage: Option<&Path>,
+    mark: Option<&Value>,
+) -> Result<Vec<u8>, ServiceFailure> {
+    let mut v = json!({"protocolVersion":1,"operation":operation,"request":id.request,"generation":id.generation,"inputLocator":input.to_str().ok_or(ServiceFailure::InputUnavailable)?});
+    if operation == "add" {
+        v["outputLocator"] = json!(output
+            .and_then(Path::to_str)
+            .ok_or(ServiceFailure::InputUnavailable)?);
+        v["stagingLocator"] = json!(stage
+            .and_then(Path::to_str)
+            .ok_or(ServiceFailure::InputUnavailable)?);
+        v["personalMark"] = mark.ok_or(ServiceFailure::ResultInvalid)?.clone();
+    }
+    let raw = serde_json::to_vec(&v).map_err(|_| ServiceFailure::ResultInvalid)?;
+    parse_request(&raw)?;
+    Ok(raw)
+}
+pub fn parse_product_response(
+    raw: &[u8],
+    expected: RequestIdentity,
+    operation: &str,
+    exit: i32,
+) -> Result<HelperOutcome, ServiceFailure> {
+    if !matches!(operation, "add" | "limited_inspect") {
+        return Err(ServiceFailure::ResultInvalid);
+    }
+    if exit != 0 {
+        return Err(ServiceFailure::ServiceUnavailable);
+    }
+    let v = parse(raw, MAX_RESPONSE_BYTES)?;
+    if identity(&v)? != expected {
+        return Err(ServiceFailure::ResultInvalid);
+    }
+    match v["status"].as_str() {
+        Some("SUCCESS")
+            if keys(
+                &v,
+                &[
+                    "protocolVersion",
+                    "request",
+                    "generation",
+                    "status",
+                    "result",
+                ],
+            ) =>
+        {
+            crate::product_contract::validate_product_result(&v["result"], operation)
+                .map_err(|_| ServiceFailure::ResultInvalid)?;
+            Ok(HelperOutcome::Success(v["result"].clone()))
+        }
+        Some("FAILURE") => parse_response(raw, expected, exit),
+        _ => Err(ServiceFailure::ResultInvalid),
+    }
 }
 pub fn encode_request(id: RequestIdentity, path: &Path) -> Result<Vec<u8>, ServiceFailure> {
     let path = path.to_str().ok_or(ServiceFailure::InputUnavailable)?;
@@ -219,6 +326,33 @@ pub fn read_bounded(reader: &mut impl Read, cap: usize) -> Result<Vec<u8>, Servi
 }
 pub fn serve(reader: &mut impl Read, writer: &mut impl Write) -> Result<(), ServiceFailure> {
     let req = parse_request(&read_bounded(reader, MAX_REQUEST_BYTES)?)?;
+    if req.operation != "INSPECT_LIMITED" {
+        let result = if req.operation == "limited_inspect" {
+            crate::product::inspect_path(Path::new(&req.locator))
+        } else {
+            crate::product::add_stage(
+                Path::new(&req.locator),
+                Path::new(req.output.as_deref().ok_or(ServiceFailure::ResultInvalid)?),
+                Path::new(req.stage.as_deref().ok_or(ServiceFailure::ResultInvalid)?),
+                req.mark.as_ref().ok_or(ServiceFailure::ResultInvalid)?,
+            )
+        };
+        let v = match result {
+            Ok(result) => {
+                json!({"protocolVersion":1,"request":req.identity.request,"generation":req.identity.generation,"status":"SUCCESS","result":result})
+            }
+            Err(error) => {
+                json!({"protocolVersion":1,"request":req.identity.request,"generation":req.identity.generation,"status":"FAILURE","error":error.code()})
+            }
+        };
+        let mut raw = serde_json::to_vec(&v).map_err(|_| ServiceFailure::ResultInvalid)?;
+        raw.push(b'\n');
+        parse_product_response(&raw, req.identity, &req.operation, 0)?;
+        return writer
+            .write_all(&raw)
+            .and_then(|_| writer.flush())
+            .map_err(|_| ServiceFailure::ServiceUnavailable);
+    }
     let mut terminal = TerminalState::new(req.identity);
     match InputLocator::new(Path::new(&req.locator)).and_then(|l| l.capture()) {
         Ok(snapshot) => {
