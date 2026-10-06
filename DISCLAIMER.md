@@ -1,5 +1,21 @@
 # しるし / Shirushi 製品上の注意事項
 
+## v0.2 Release preparationの対象範囲
+
+v0.2は公開前です。現在のDevelopment実装はWindows x64の単一PNG/JPEG AddとLimited Inspection、固定Rights Intent、5言語、Explorer入口を対象にします。公開build／installer／通常実機起動／clean Windowsの確認は未完で、Development PASSを公開readyと読み替えません。
+
+検査結果は`LIMITED_INSPECTION / INCOMPLETE`です。C2PA/CAWGの対象情報を読みますが、TrustMarkは`NOT_CHECKED`、`fullVerificationPerformed=false`、署名者の信頼は`trustValidated=false`です。「完全性を確認済み」「完全検証」「作者認証」の意味に置き換えないでください。検査できない画像と、対象情報が見つからない画像も区別します。
+
+AIサービスの認識・遵守や利用阻止、作者本人性、著作権保有、法的効力、完全なprovenance、Production Trustを保証しません。情報がない結果は利用許可でも拒否でもありません。必要な権利または許諾を持つ画像に使用してください。
+
+Personal Markのサイン・motionはUI表示であり、画像pixelsへ焼き込みません。ただしその情報はmetadataとして出力に含まれます。元画像と既存出力は上書きせず、出力は別ファイルです。再保存・変換・SNS・編集等でmetadataが失われる可能性があり、入力metadataの完全保持も保証しません。
+
+v0.2 Previewの画像署名は既存の公開テスト資格情報によるPreview integrityであり、正式な作者／publisher署名ではありません。このテスト資格情報は第三者も利用でき、Production Trust、作者本人性、著作権保有の証明にはなりません。Production Trustはpost-v0.2の対象です。Windows executableのAuthenticodeと画像のC2PA署名は別の信頼境界です。Windowsの実行拒否を回避する手順は提供しません。
+
+以下は公開済みv0.1 Previewの説明です。TrustMarkや「完全性を確認済み」に関する旧版の説明をv0.2へ適用しないでください。
+
+---
+
 ## この文書について
 
 この文書は、Windows上でローカルに動作するShirushi v0.1 Previewの製品能力と、その限界を説明します。法律相談や、個別の著作権・契約・利用許諾に関する判断を提供するものではありません。

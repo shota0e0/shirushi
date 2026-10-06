@@ -1,24 +1,32 @@
 #[cfg(all(feature = "manual-canary", not(debug_assertions)))]
 compile_error!("the manual-canary feature is DEVELOPMENT CANARY only and must not be built without debug assertions");
+#[cfg(all(feature = "preview-release", feature = "manual-canary"))]
+compile_error!("preview-release and manual-canary are separate authorities and cannot be combined");
+#[cfg(all(feature = "preview-release", not(all(windows, target_arch = "x86_64", target_env = "msvc"))))]
+compile_error!("the public Preview product path supports only Windows x64 MSVC");
 
 #[cfg(test)]
 mod asset_stage;
 mod explorer_entry;
+#[cfg(not(feature = "preview-release"))]
 mod host;
 // Host-owned inspection boundary; development command reuses this supervisor.
 pub mod inspection_protocol;
 pub mod inspection_supervisor;
 // Development/CI package identity Canary. No Production helper discovery.
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
 pub mod inspection_package;
 pub mod limited_inspection;
 #[path = "../../tools/f3a-rust-sdk-parity/src/product_contract.rs"]
 mod product_contract;
 mod product_image;
-#[cfg(all(windows, debug_assertions))]
+#[cfg(feature = "preview-release")]
+mod prerequisite_probe;
+#[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
 mod product_operation;
 mod protocol;
 
+#[cfg(not(feature = "preview-release"))]
 use host::BridgeHost;
 use protocol::{BridgeError, GET_CAPABILITIES, LOAD_PERSONAL_MARK};
 use serde_json::Value;
@@ -30,12 +38,21 @@ use tauri::Manager;
 struct BridgeRuntime(Arc<BridgeRuntimeInner>);
 
 enum BridgeRuntimeInner {
+    #[cfg(not(feature = "preview-release"))]
     Ready(BridgeHost),
+    #[cfg(not(feature = "preview-release"))]
     Failed(BridgeError),
+    #[cfg(feature = "preview-release")]
+    NativePreview,
 }
 
 impl BridgeRuntime {
     fn start() -> Self {
+        #[cfg(feature = "preview-release")]
+        {
+            Self(Arc::new(BridgeRuntimeInner::NativePreview))
+        }
+        #[cfg(not(feature = "preview-release"))]
         Self(Arc::new(match BridgeHost::start() {
             Ok(host) => BridgeRuntimeInner::Ready(host),
             Err(error) => BridgeRuntimeInner::Failed(error),
@@ -44,6 +61,9 @@ impl BridgeRuntime {
 
     fn call(&self, method: &'static str) -> Result<Value, BridgeError> {
         match self.0.as_ref() {
+            #[cfg(feature = "preview-release")]
+            BridgeRuntimeInner::NativePreview => preview_bridge_call(method),
+            #[cfg(not(feature = "preview-release"))]
             BridgeRuntimeInner::Ready(host) => {
                 if let Some(error) = host.health_error() {
                     Err(error)
@@ -51,15 +71,48 @@ impl BridgeRuntime {
                     host.request(method)
                 }
             }
+            #[cfg(not(feature = "preview-release"))]
             BridgeRuntimeInner::Failed(error) => Err(error.clone()),
         }
     }
 
     fn shutdown(&self) {
+        #[cfg(not(feature = "preview-release"))]
         if let BridgeRuntimeInner::Ready(host) = self.0.as_ref() {
             host.shutdown();
         }
     }
+}
+
+#[cfg(feature = "preview-release")]
+fn preview_bridge_call(method: &'static str) -> Result<Value, BridgeError> {
+    match method {
+        GET_CAPABILITIES => Ok(serde_json::json!({
+            "authority":"NATIVE_PREVIEW_SESSION_ONLY",
+            "bridgeProtocolVersion":1,"personalMarkSchemaVersions":[1],"renderProfiles":[],
+            "capabilities":{"personalMarkRead":false,"personalMarkWrite":false,
+                "nativeTargetSelection":true,"coreAdd":true,"coreVerify":true,
+                "coreReadback":false,"c2paPersonalMarkEmbedding":true,"explorerIntegration":true}
+        })),
+        // No repository profile import/read/write. The existing browser adapter
+        // owns the session-only mark; absence here is not Python authority.
+        LOAD_PERSONAL_MARK => Ok(serde_json::json!({
+            "contract":"shirushi-personal-mark-session","contractVersion":1,"state":"absent"
+        })),
+        _ => Err(BridgeError::new(
+            "UNSUPPORTED_METHOD",
+            "Preview bridge method unavailable",
+        )),
+    }
+}
+
+fn prepare_application_environment() -> Result<Option<std::path::PathBuf>, BridgeError> {
+    #[cfg(feature = "preview-release")]
+    {
+        Ok(None)
+    }
+    #[cfg(not(feature = "preview-release"))]
+    host::prepare_process_environment()
 }
 
 #[tauri::command]
@@ -192,8 +245,14 @@ impl ExpectedSource {
 }
 
 pub fn run() {
+    #[cfg(feature = "preview-release")]
+    if let Some(code) = prerequisite_probe::run_if_requested(std::env::args_os().skip(1)) {
+        // Exact read-only installer preflight: never initialize UI, Python,
+        // helper runtime, registration, or an installer in this process.
+        std::process::exit(code);
+    }
     let explorer = explorer_entry::ExplorerEntry::from_args(std::env::args_os().skip(1));
-    let webview_data_directory = match host::prepare_process_environment() {
+    let webview_data_directory = match prepare_application_environment() {
         Ok(path) => path,
         Err(error) => {
             eprintln!(
@@ -273,6 +332,31 @@ fn is_local_app_url(url: &tauri::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "preview-release")]
+    #[test]
+    fn preview_bridge_is_native_session_only_and_does_not_claim_profile_authority() {
+        let runtime = BridgeRuntime::start();
+        let capabilities = runtime.call(GET_CAPABILITIES).unwrap();
+        assert_eq!(capabilities["authority"], "NATIVE_PREVIEW_SESSION_ONLY");
+        assert_eq!(
+            capabilities["personalMarkSchemaVersions"],
+            serde_json::json!([1])
+        );
+        assert_eq!(capabilities["capabilities"]["personalMarkRead"], false);
+        assert_eq!(capabilities["capabilities"]["personalMarkWrite"], false);
+        assert_eq!(
+            runtime.call(LOAD_PERSONAL_MARK).unwrap(),
+            serde_json::json!({
+                "contract":"shirushi-personal-mark-session","contractVersion":1,"state":"absent"
+            })
+        );
+        assert_eq!(
+            runtime.call("unknown").unwrap_err().code,
+            "UNSUPPORTED_METHOD"
+        );
+        runtime.shutdown();
+    }
 
     #[test]
     fn navigation_is_local_only() {

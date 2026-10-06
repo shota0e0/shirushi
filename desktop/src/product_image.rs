@@ -3,7 +3,7 @@ use crate::protocol::BridgeError;
 use serde_json::Value;
 
 pub fn choose() -> Result<Option<Value>, BridgeError> {
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     {
         use windows_sys::Win32::UI::Controls::Dialogs::{
             CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
@@ -33,7 +33,7 @@ pub fn choose() -> Result<Option<Value>, BridgeError> {
         let path = String::from_utf16(&path[..len]).map_err(|_| error("IMAGE_SELECTION_FAILED"))?;
         read_with_bound(&path, 32 * 1024 * 1024).map(Some)
     }
-    #[cfg(not(all(windows, debug_assertions)))]
+    #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
     {
         Err(error("DEV_CANARY_ONLY"))
     }
@@ -48,7 +48,7 @@ pub fn read(input: &str) -> Result<Value, BridgeError> {
 }
 
 fn read_with_bound(input: &str, maximum: u64) -> Result<Value, BridgeError> {
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     {
         use base64::{engine::general_purpose::STANDARD, Engine};
         use sha2::{Digest, Sha256};
@@ -84,7 +84,7 @@ fn read_with_bound(input: &str, maximum: u64) -> Result<Value, BridgeError> {
             "reference":input,"local":true,"sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len()}),
         )
     }
-    #[cfg(not(all(windows, debug_assertions)))]
+    #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
     {
         let _ = (input, maximum);
         Err(error("DEV_CANARY_ONLY"))

@@ -1,10 +1,10 @@
 //! Development product operations reuse the existing single-owner supervisor.
 //! Helper verifies a private stage; only this controller publishes no-clobber.
-#![cfg(all(windows, debug_assertions))]
+#![cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
 use crate::{
     inspection_protocol::{self, HelperOutcome, RequestIdentity, ServiceFailure},
     inspection_supervisor::Control,
-    limited_inspection::{pin_input, resolve_development_package},
+    limited_inspection::{pin_input, resolve_compiled_package},
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -175,9 +175,7 @@ fn run_from_executable(
                 _ => None,
             },
         )?;
-        let digest = option_env!("SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256")
-            .ok_or(ServiceFailure::ServiceUnavailable)?;
-        let package = resolve_development_package(executable, digest)?;
+        let package = resolve_compiled_package(executable)?;
         let report = crate::inspection_supervisor::invoke(
             &package.configuration(),
             &raw,
@@ -186,7 +184,7 @@ fn run_from_executable(
             Duration::from_secs(30),
             Duration::from_secs(5),
         );
-        #[cfg(all(test, shirushi_dev_limited_inspection_canary))]
+        #[cfg(all(test, debug_assertions, shirushi_dev_limited_inspection_canary))]
         println!(
             "PRODUCT_NATIVE_CONTROLLER_CLEANUP: reaped={} jobActiveProcesses={:?} jobTotalProcesses={:?} exitCode={:?}",
             report.reaped, report.job_active_processes, report.job_total_processes, report.exit_code
@@ -323,7 +321,7 @@ mod tests {
     // This test fixture surface is absent unless CI explicitly opts in when
     // compiling lib tests. No runtime environment lookup or normal-build
     // executable-root override is introduced by the shared implementation.
-    #[cfg(shirushi_dev_limited_inspection_canary)]
+    #[cfg(all(debug_assertions, shirushi_dev_limited_inspection_canary))]
     #[test]
     fn native_controller_png_jpeg_add_inspect_roundtrip_and_fail_closed_publication() {
         use std::io::Write;

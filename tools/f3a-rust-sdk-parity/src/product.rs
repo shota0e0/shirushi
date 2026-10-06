@@ -369,7 +369,10 @@ pub fn add_stage(input: &Path, output: &Path, stage: &Path, mark: &Value) -> Res
     written
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(feature = "preview-release", not(all(windows, target_arch = "x86_64"))))]
+compile_error!("the public Preview helper supports only Windows x64");
+
+#[cfg(any(debug_assertions, feature = "preview-release"))]
 fn sign(bytes: &[u8], format: image::ImageFormat, mark: &Value) -> Result<Vec<u8>, Error> {
     let signer = c2pa::create_signer::from_keys(
         include_bytes!("development-signing/es256.pub"),
@@ -403,7 +406,7 @@ fn sign(bytes: &[u8], format: image::ImageFormat, mark: &Value) -> Result<Vec<u8
         .map_err(|_| Error::InternalSdkFailure)?;
     Ok(out.into_inner())
 }
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, feature = "preview-release")))]
 fn sign(_: &[u8], _: image::ImageFormat, _: &Value) -> Result<Vec<u8>, Error> {
     Err(Error::ServiceUnavailable)
 }

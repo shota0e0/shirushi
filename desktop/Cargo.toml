@@ -23,6 +23,7 @@ required-features = ["manual-canary"]
 [features]
 default = []
 manual-canary = ["tauri/custom-protocol"]
+preview-release = ["tauri/custom-protocol", "dep:webview2-com-sys", "dep:windows-core"]
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = [] }
@@ -36,4 +37,6 @@ sha2 = "=0.10.9"
 tauri = { version = "=2.11.5", features = [] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_Controls_Dialogs"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls_Dialogs"] }
+webview2-com-sys = { version = "=0.38.2", optional = true }
+windows-core = { version = "=0.61.2", optional = true }

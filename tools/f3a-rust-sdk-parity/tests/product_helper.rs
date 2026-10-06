@@ -80,6 +80,7 @@ fn staged(format: image::ImageFormat, ext: &str, m: Value) {
     assert_eq!(parsed["inspection"]["cawg"]["aiInferenceUse"], "NOT_WANTED");
     assert_eq!(parsed["inspection"]["trustmark"], "NOT_CHECKED");
     assert_eq!(parsed["inspection"]["fullVerificationPerformed"], false);
+    assert_eq!(parsed["inspection"]["c2pa"]["trustValidated"], false);
     assert_eq!(
         image::load_from_memory(&original).unwrap().to_rgba8(),
         image::load_from_memory(&signed).unwrap().to_rgba8()
@@ -138,6 +139,14 @@ fn png_add_embeds_exact_rights_and_metadata_without_changing_pixels_or_source() 
 #[test]
 fn jpeg_add_embeds_exact_rights_and_metadata_without_changing_pixels_or_source() {
     staged(image::ImageFormat::Jpeg, "jpeg", mark());
+}
+#[cfg(feature = "preview-release")]
+#[test]
+fn explicit_preview_feature_keeps_public_test_signatures_untrusted() {
+    // staged() independently checks developmentSigning=true, untrusted Preview
+    // inspection, exact CAWG/mark values, unchanged pixels and unchanged source.
+    staged(image::ImageFormat::Png, "png", mark());
+    staged(image::ImageFormat::Jpeg, "jpg", mark());
 }
 #[test]
 fn handwritten_metadata_roundtrips_without_visible_pixel_changes() {

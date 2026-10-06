@@ -88,12 +88,12 @@ impl LimitedInspectionRuntime {
         &self,
         request: InspectionRequest,
     ) -> Result<InspectionInvocation, BridgeError> {
-        #[cfg(not(all(windows, debug_assertions)))]
+        #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
         {
             let _ = request;
             return Err(invocation_error("DEV_CANARY_ONLY"));
         }
-        #[cfg(all(windows, debug_assertions))]
+        #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
         {
             let input = request.validate()?;
             let mut state = self
@@ -255,6 +255,34 @@ pub(crate) fn resolve_development_package(
     Ok(package)
 }
 
+#[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
+pub(crate) fn resolve_compiled_package(
+    executable: &Path,
+) -> Result<crate::inspection_package::CanaryPackage, ServiceFailure> {
+    #[cfg(debug_assertions)]
+    {
+        #[cfg(feature = "preview-release")]
+        let digest = option_env!("SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256");
+        #[cfg(not(feature = "preview-release"))]
+        let digest = option_env!("SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256");
+        resolve_development_package(
+            executable,
+            digest.ok_or(ServiceFailure::ServiceUnavailable)?,
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        // The release constructor obtains its own executable/root. This internal
+        // parameter exists only for the shared debug-test implementation above.
+        let actual = std::env::current_exe().map_err(|_| ServiceFailure::ServiceUnavailable)?;
+        if actual != executable {
+            return Err(ServiceFailure::ServiceUnavailable);
+        }
+        crate::inspection_package::CanaryPackage::from_current_executable()
+            .map_err(|_| ServiceFailure::ServiceUnavailable)
+    }
+}
+
 /// Explicit native-test path injection only; absent from normal and release
 /// application builds. Even this test surface uses ONLY the compiled digest.
 #[cfg(all(windows, debug_assertions, shirushi_dev_limited_inspection_canary))]
@@ -271,7 +299,7 @@ impl InspectionInvocation {
     /// Product operations share the same reservation, compiled helper identity,
     /// supervisor and shutdown notification as the existing inspection path.
     pub(crate) fn run_product(self, mark: Option<Value>, expected: crate::ExpectedSource) -> Value {
-        #[cfg(all(windows, debug_assertions))]
+        #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
         {
             let result = crate::product_operation::run(
                 &self.input,
@@ -288,26 +316,22 @@ impl InspectionInvocation {
                 }
             })
         }
-        #[cfg(not(all(windows, debug_assertions)))]
+        #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
         {
             let _ = (mark, expected);
             failed(ServiceFailure::ServiceUnavailable)
         }
     }
     pub(crate) fn run(self) -> Value {
-        #[cfg(all(windows, debug_assertions))]
+        #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
         {
             self.run_with(|input, id, control| {
                 // OS executable location is the only root authority. Digest is
                 // independently embedded at compilation, never read from runtime
                 // environment or inferred from the sibling manifest.
-                let digest = option_env!("SHIRUSHI_DEV_INSPECTION_MANIFEST_SHA256");
-                let Some(digest) = digest else {
-                    return Err(ServiceFailure::ServiceUnavailable);
-                };
                 let executable =
                     std::env::current_exe().map_err(|_| ServiceFailure::ServiceUnavailable)?;
-                let package = resolve_development_package(&executable, digest)?;
+                let package = resolve_compiled_package(&executable)?;
                 let mut report = crate::inspection_supervisor::inspect(
                     &package.configuration(),
                     input,
@@ -326,12 +350,12 @@ impl InspectionInvocation {
                 Ok(report)
             })
         }
-        #[cfg(not(all(windows, debug_assertions)))]
+        #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
         {
             failed(ServiceFailure::ServiceUnavailable)
         }
     }
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     fn run_with(
         self,
         runner: impl FnOnce(&Path, RequestIdentity, &Control) -> Result<ProcessReport, ServiceFailure>,
@@ -350,11 +374,11 @@ impl InspectionInvocation {
     }
 }
 
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
 pub(crate) struct InputGuard {
     _files: Vec<std::fs::File>,
 }
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
 pub(crate) fn pin_input(input: &Path) -> Result<InputGuard, ServiceFailure> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -813,7 +837,7 @@ mod tests {
             "INSPECTION_UNAVAILABLE"
         );
     }
-    #[cfg(not(all(windows, debug_assertions)))]
+    #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
     #[test]
     fn production_and_non_windows_dispatch_have_no_helper_authority() {
         let request = InspectionRequest {

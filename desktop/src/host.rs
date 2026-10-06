@@ -55,6 +55,12 @@ struct LaunchConfig {
 
 impl LaunchConfig {
     fn production() -> Result<Self, BridgeError> {
+        if cfg!(feature = "preview-release") {
+            return Err(BridgeError::new(
+                "PREVIEW_NATIVE_ONLY",
+                "Preview never starts the repository Python bridge",
+            ));
+        }
         if !cfg!(debug_assertions) {
             return Err(BridgeError::new(
                 "DEV_CANARY_ONLY",

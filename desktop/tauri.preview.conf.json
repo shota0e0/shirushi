@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Shirushi Preview",
+  "version": "0.2.0-preview.1",
+  "identifier": "io.shirushi.desktop.preview",
+  "bundle": {
+    "active": false,
+    "targets": ["nsis"],
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "skip" },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English", "Japanese", "SimpChinese", "TradChinese", "Korean"],
+        "displayLanguageSelector": true
+      }
+    }
+  }
+}

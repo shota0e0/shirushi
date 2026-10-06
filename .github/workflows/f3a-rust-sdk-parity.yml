@@ -53,7 +53,7 @@ jobs:
     name: LIMITED_INSPECTION_NATIVE_VALIDATION
     if: github.event_name == 'push' && github.ref == 'refs/heads/codex/limited-inspection-native-validation'
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       RUSTUP_TOOLCHAIN: 1.88.0-x86_64-pc-windows-msvc
     steps:
@@ -87,7 +87,7 @@ jobs:
           "LIMITED_NATIVE_INDEX_SHA=$indexSha" >> $env:GITHUB_ENV
           "index_sha=$indexSha" >> $env:GITHUB_OUTPUT
           $locks = @{
-            'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+            'desktop/Cargo.lock' = '0ff501939a8e7a77be3e261c4f10f64b3c85a1f40362958b186e42b9a8491a94'
             'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
           }
           foreach ($path in $locks.Keys) {
@@ -141,7 +141,7 @@ jobs:
           cargo +1.88.0 fetch --locked --manifest-path desktop/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $locks = @{
-            'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+            'desktop/Cargo.lock' = '0ff501939a8e7a77be3e261c4f10f64b3c85a1f40362958b186e42b9a8491a94'
             'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
           }
           foreach ($path in $locks.Keys) {
@@ -647,6 +647,209 @@ jobs:
           '@ | & .\.venv-py312\Scripts\python.exe -B -
           if ($LASTEXITCODE -ne 0) { throw 'VC_DEPLOYMENT_FLOOR_COMPATIBILITY_UNPROVEN' }
 
+      - name: Build explicit public-test Preview release inputs and native contracts
+        id: preview_build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Official tauri-cli-v2.11.3 Cargo metadata: rust-version 1.77.2.
+          # 2.12.1 requires 1.90; do not change the approved Rust1.88 toolchain.
+          $cliRoot = Join-Path $env:RUNNER_TEMP 'shirushi-preview-tauri-cli-2.11.3'
+          cargo +1.88.0 install tauri-cli --version '=2.11.3' --locked --root $cliRoot --target-dir (Join-Path $env:RUNNER_TEMP 'shirushi-preview-cli-target')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = (Join-Path $cliRoot 'bin') + [IO.Path]::PathSeparator + $env:PATH
+          if ((Get-Command cargo-tauri -ErrorAction Stop).Source -ne (Join-Path $cliRoot 'bin/cargo-tauri.exe')) { throw 'PREVIEW_CLI_PATH_MISMATCH' }
+          $version = cargo +1.88.0 tauri --version
+          if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne 'tauri-cli 2.11.3') { throw 'PREVIEW_CLI_VERSION_MISMATCH' }
+          "PATH=$env:PATH" >> $env:GITHUB_ENV
+          cargo +1.88.0 build --release --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --features preview-release --bin shirushi-inspection-helper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $helperLog = Join-Path $env:RUNNER_TEMP 'preview-helper-tests.log'
+          cargo +1.88.0 test --release --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --features preview-release --test product_helper -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $helperLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-Item -LiteralPath $helperLog).Length -gt 2097152 -or [IO.File]::ReadAllText($helperLog) -notmatch 'explicit_preview_feature_keeps_public_test_signatures_untrusted \.\.\. ok') { throw 'PREVIEW_HELPER_FEATURE_TEST_NOT_EXECUTED' }
+          cargo +1.88.0 test --release --locked --offline --target x86_64-pc-windows-msvc --manifest-path tools/f3a-rust-sdk-parity/Cargo.toml --features preview-release --test helper_process -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $helper = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/shirushi-inspection-helper.exe'
+          $trusted = Join-Path $env:RUNNER_TEMP 'preview-release-trusted-input'
+          New-Item -ItemType Directory -Path $trusted -ErrorAction Stop | Out-Null
+          $manifest = Join-Path $trusted 'inspection-helper.manifest.json'
+          $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PWD '.venv-py312/Scripts/python.exe'))
+          $start.UseShellExecute = $false
+          $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+          foreach ($arg in @('-B',(Join-Path $PWD 'scripts/package_v02_development.py'),'prepare-manifest','--helper',$helper)) { $start.ArgumentList.Add($arg) }
+          $out = [IO.File]::Open($manifest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+          $p = [Diagnostics.Process]::Start($start)
+          try {
+            $p.StandardOutput.BaseStream.CopyTo($out); $out.Dispose()
+            $diagnostic = $p.StandardError.ReadToEnd(); $p.WaitForExit()
+            if ($p.ExitCode -ne 0 -or (Get-Item -LiteralPath $manifest).Length -lt 1 -or (Get-Item -LiteralPath $manifest).Length -gt 4096 -or $diagnostic.Length -gt 8192) { throw 'PREVIEW_MANIFEST_PREPARATION_FAILED' }
+          } finally { $out.Dispose(); $p.Dispose() }
+          $digest = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($diagnostic.Trim() -ne "DEVELOPMENT_MANIFEST_SHA256: $digest") { throw 'PREVIEW_MANIFEST_DIGEST_MISMATCH' }
+          # Build-only Preview authority; debug canary input variables stay unchanged.
+          $env:SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256 = $digest
+          $env:TAURI_CONFIG = [IO.File]::ReadAllText((Join-Path $PWD 'desktop/tauri.preview.conf.json'))
+          cargo +1.88.0 build --release --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --features preview-release --bin shirushi-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $desktopLog = Join-Path $env:RUNNER_TEMP 'preview-desktop-tests.log'
+          cargo +1.88.0 test --release --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --features preview-release --lib -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $desktopLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-Item -LiteralPath $desktopLog).Length -gt 2097152) { throw 'PREVIEW_DESKTOP_TEST_LOG_BOUND' }
+          $control = [IO.File]::ReadAllText($desktopLog)
+          foreach ($test in @('preview_bridge_is_native_session_only_and_does_not_claim_profile_authority','preview_manifest_digest_is_an_explicit_canonical_compiled_input','cli_is_exact_single_flag_and_does_not_consume_normal_or_explorer_startup','only_stable_positive_canonical_four_part_versions_are_accepted','all_webview_override_keys_fail_closed_without_reading_values','every_failure_code_is_nonzero_and_distinct')) {
+            if ($control -notmatch ([regex]::Escape($test) + ' \.\.\. ok')) { throw 'PREVIEW_RELEASE_CONTRACT_TEST_NOT_EXECUTED' }
+          }
+          "SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256=$digest" >> $env:GITHUB_ENV
+          "PREVIEW_TRUSTED_MANIFEST=$manifest" >> $env:GITHUB_ENV
+          'PREVIEW_NATIVE_BUILD: RELEASE_FEATURE; PUBLIC_TEST_CREDENTIALS_ONLY; NO_UI_OR_SETUP_LAUNCH'
+
+      - name: Generate and independently audit Preview NSIS without executing setup
+        id: preview_package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & .\.venv-py312\Scripts\python.exe -B -m unittest tests.test_prepare_v02_preview -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import hashlib, json, os, re, shutil, stat, struct, subprocess, sys
+          from pathlib import Path, PureWindowsPath
+          ROOT, RUNNER = Path.cwd(), Path(os.environ['RUNNER_TEMP'])
+          RELEASE = Path(os.environ['CARGO_TARGET_DIR'])/'x86_64-pc-windows-msvc/release'
+          NATIVE = ('shirushi-desktop.exe','shirushi-inspection-helper.exe')
+          MANIFEST = 'inspection-helper.manifest.json'
+          DOCS = ('README.md','DISCLAIMER.md','PRIVACY.md','THIRD_PARTY_NOTICES.md')
+          MAX = 268435456
+          def require(ok, code):
+              if not ok: raise ValueError(code)
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  require(key not in value, 'PREVIEW_DUPLICATE_JSON'); value[key] = item
+              return value
+          def strict(raw):
+              return json.loads(raw, object_pairs_hook=unique, parse_constant=lambda value: require(False,'PREVIEW_JSON_CONSTANT'))
+          def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode('ascii')
+          def regular(path, directory=False):
+              for item in (path,*path.parents):
+                  info=item.lstat()
+                  require(not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,'PREVIEW_REPARSE_PATH')
+                  require(stat.S_ISDIR(info.st_mode) if item!=path or directory else stat.S_ISREG(info.st_mode),'PREVIEW_FILE_TYPE')
+              return path.stat()
+          def measure(path, maximum=MAX, machine=None, subsystem=None):
+              info=regular(path); require(0<info.st_size<=maximum,'PREVIEW_FILE_BOUND')
+              raw=path.read_bytes(); after=regular(path)
+              require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) and len(raw)==info.st_size,'PREVIEW_INPUT_CHANGED')
+              if machine is not None:
+                  require(len(raw)>=64 and raw[:2]==b'MZ','PREVIEW_NOT_PE'); offset=struct.unpack_from('<I',raw,60)[0]
+                  require(64<=offset<=len(raw)-94 and raw[offset:offset+4]==b'PE\0\0','PREVIEW_INVALID_PE')
+                  require(struct.unpack_from('<H',raw,offset+4)[0]==machine,'PREVIEW_MACHINE_MISMATCH')
+                  if subsystem is not None: require(struct.unpack_from('<H',raw,offset+92)[0]==subsystem,'PREVIEW_SUBSYSTEM_MISMATCH')
+              return dict(size=len(raw),sha256=hashlib.sha256(raw).hexdigest())
+          def run(argv, name, timeout=120, cwd=ROOT, input_bytes=None):
+              out,err=WORK/(name+'.stdout'),WORK/(name+'.stderr')
+              with out.open('xb') as stdout,err.open('xb') as stderr:
+                  p=subprocess.run(argv,input=input_bytes,stdout=stdout,stderr=stderr,timeout=timeout,cwd=cwd,check=False)
+              require(p.returncode==0,'PREVIEW_PROCESS_FAILED_'+name.upper())
+              require(out.stat().st_size<=2097152 and err.stat().st_size<=2097152,'PREVIEW_LOG_BOUND')
+              return out.read_bytes()
+          WORK=RUNNER/'shirushi-v02-preview-validation'; require(not WORK.exists(),'PREVIEW_WORK_EXISTS'); WORK.mkdir()
+          before={name:measure(RELEASE/name,machine=0x8664,subsystem=2 if name==NATIVE[0] else 3) for name in NATIVE}
+          manifest_raw=Path(os.environ['PREVIEW_TRUSTED_MANIFEST']).read_bytes(); require(0<len(manifest_raw)<=4096,'PREVIEW_MANIFEST_BOUND')
+          manifest={'schemaVersion':1,'relativePath':NATIVE[1],'size':before[NATIVE[1]]['size'],'sha256':before[NATIVE[1]]['sha256'],'protocolVersion':1}
+          require(strict(manifest_raw)==manifest and manifest_raw==canonical(manifest),'PREVIEW_MANIFEST_IDENTITY')
+          digest=hashlib.sha256(manifest_raw).hexdigest(); require(digest==os.environ['SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256'],'PREVIEW_COMPILED_DIGEST_CHANGED')
+          # Exercise the exact release helper over its real one-shot protocol.
+          # These CI-only subprocesses never launch Desktop, setup or vendors.
+          counter=0
+          def helper(operation,path,**extra):
+              global counter
+              counter+=1
+              request=dict(protocolVersion=1,operation=operation,request=counter,generation=1,inputLocator=str(path),**extra)
+              raw=run([str(RELEASE/NATIVE[1])],'helper_'+str(counter),30,input_bytes=canonical(request))
+              require(len(raw)<=65536 and (WORK/('helper_'+str(counter)+'.stderr')).stat().st_size<=4096,'PREVIEW_HELPER_OUTPUT_BOUND')
+              value=strict(raw)
+              require(set(value)=={'protocolVersion','request','generation','status','result'} and value['protocolVersion']==1 and value['request']==counter and value['generation']==1 and value['status']=='SUCCESS','PREVIEW_HELPER_RESPONSE')
+              return value['result']
+          mark={'version':1,'mode':'typed','typed':'Preview 作者','handwritten':{'coordinateSpace':{'width':480,'height':220},'strokes':[]}}
+          for ext in ('png','jpg'):
+              source=WORK/('Preview 日本語 sample.'+ext); source.write_bytes((ROOT/'tests/fixtures/inspection'/('plain_no_shirushi.'+ext)).read_bytes())
+              original=measure(source)
+              plain=helper('limited_inspect',source)
+              require(plain['result']=='LIMITED_INSPECTION' and plain['completeness']=='INCOMPLETE' and plain['inspection']['c2pa']['presence']=='ABSENT' and plain['inspection']['personalMark'] is None,'PREVIEW_UNMARKED_PROTOCOL')
+              owned=WORK/('owned-stage-'+ext); owned.mkdir(); stage=owned/('staged.'+ext); final=source.with_name(source.stem+'_rights'+source.suffix)
+              added=helper('add',source,outputLocator=str(final),stagingLocator=str(stage),personalMark=mark)
+              require(added['result']=='ADD_STAGED' and added['developmentSigning'] is True and added['personalMark']==mark and added['output']['path']==str(stage) and added['output']['finalPath']==str(final) and not final.exists(),'PREVIEW_ADD_PROTOCOL')
+              require(measure(stage)=={k:added['output'][k] for k in ('size','sha256')},'PREVIEW_STAGE_IDENTITY')
+              inspected=helper('limited_inspect',stage); inner=inspected['inspection']
+              require(inspected['result']=='LIMITED_INSPECTION' and inspected['completeness']=='INCOMPLETE' and inspected['checks']=={'c2pa':'INSPECTED','cawg':'INSPECTED','trustmark':'NOT_CHECKED'},'PREVIEW_INSPECTION_SCOPE')
+              require(inner['personalMark']==mark and inner['cawg']['aiTrainingUse']=='NOT_WANTED' and inner['cawg']['aiInferenceUse']=='NOT_WANTED' and inner['c2pa']['signature']=='PREVIEW' and inner['c2pa']['trustValidated'] is False and inner['fullVerificationPerformed'] is False and inner['trustmark']=='NOT_CHECKED','PREVIEW_TEST_TRUST_SCOPE')
+              require(measure(source)==original and not final.exists(),'PREVIEW_SOURCE_CHANGED')
+              print('PREVIEW_RELEASE_HELPER_PROTOCOL: '+ext+' UNMARKED_ADD_INSPECT_PASS; PUBLIC_TEST_NOT_TRUSTED; SOURCE_UNCHANGED; STAGE_ONLY')
+          prepared=WORK/'prepared'
+          result=strict(run([sys.executable,'-B','-m','scripts.prepare_v02_preview','--desktop',str(RELEASE/NATIVE[0]),'--helper',str(RELEASE/NATIVE[1]),'--output-root',str(prepared),'--compiled-manifest-sha256',digest],'prepare'))
+          require(result['compiledManifestSha256']==digest and result['channel']=='V02_PREVIEW_PUBLIC_TEST_CREDENTIALS' and result['prerequisiteExecutionAllowed'] is False and result['productionTrust'] is False,'PREVIEW_PREPARATION_CONTRACT')
+          package=prepared/'package'; regular(package,True)
+          require({p.name for p in package.iterdir()}==set((*NATIVE,MANIFEST)),'PREVIEW_FLAT_INVENTORY')
+          require({name:measure(package/name) for name in NATIVE}==before and (package/MANIFEST).read_bytes()==manifest_raw,'PREVIEW_PACKAGE_BYTES')
+          docs={name:measure(ROOT/name,262144) for name in DOCS}
+          require({name:measure(prepared/'notices'/name,262144) for name in DOCS}==docs,'PREVIEW_NOTICE_BYTES')
+          overlay=strict((prepared/'tauri-preview.generated.json').read_bytes())
+          require(overlay['identifier']=='io.shirushi.desktop.preview' and overlay['bundle']['active'] is True and overlay['bundle']['windows']['nsis']['installMode']=='currentUser' and overlay['bundle']['windows']['webviewInstallMode']=={'type':'skip'},'PREVIEW_OVERLAY_POLICY')
+          require(strict((ROOT/'desktop/tauri.conf.json').read_bytes())['bundle']['active'] is False,'PREVIEW_BASE_BUNDLE_CHANGED')
+          require(not (RELEASE/'bundle/nsis').exists(),'PREVIEW_INSTALLER_OUTPUT_EXISTS')
+          run(['cargo','+1.88.0','tauri','bundle','--ci','--no-sign','--target','x86_64-pc-windows-msvc','--features','preview-release','--bundles','nsis','--config',str(prepared/'tauri-preview.generated.json')],'bundle',900,cwd=ROOT/'desktop')
+          require({name:measure(RELEASE/name) for name in NATIVE}==before,'PREVIEW_BUNDLER_MUTATED_NATIVE_BYTES')
+          installers=list((RELEASE/'bundle/nsis').glob('*.exe')); require(len(installers)==1,'PREVIEW_INSTALLER_COUNT')
+          installer=installers[0]; installer_identity=measure(installer)
+          require(installer.name=='Shirushi Preview_0.2.0-preview.1_x64-setup.exe','PREVIEW_UNEXPECTED_INSTALLER_NAME')
+          # The generated official Tauri template must include our exact hook,
+          # fixed main binary, all four hook call sites and skip-vendor policy.
+          generated=list((RELEASE/'nsis/x64').glob('installer.nsi'))
+          require(len(generated)==1,'PREVIEW_NSIS_SOURCE_UNAVAILABLE')
+          nsi=generated[0].read_text(encoding='utf-8-sig'); require(len(nsi)<=262144,'PREVIEW_NSIS_SOURCE_BOUND')
+          require('!define MAINBINARYNAME "shirushi-desktop"' in nsi and '!define INSTALLMODE "currentUser"' in nsi and '!define INSTALLWEBVIEW2MODE ""' in nsi,'PREVIEW_NSIS_LAYOUT_POLICY')
+          hook=prepared/'preview-hooks.nsh'
+          require(str(hook) in nsi and hook.read_bytes()==(ROOT/'desktop/installer/preview-hooks.nsh').read_bytes(),'PREVIEW_HOOK_NOT_INCLUDED')
+          for macro in ('PREINSTALL','POSTINSTALL','PREUNINSTALL','POSTUNINSTALL'):
+              require('!insertmacro NSIS_HOOK_'+macro in nsi,'PREVIEW_HOOK_CALL_MISSING')
+          require('!insertmacro SHIRUSHI_UNREGISTER_EXPLORER' in hook.read_text() and 'StrCpy $DeleteAppDataCheckboxState 0' in hook.read_text(),'PREVIEW_UNINSTALL_GUARD_MISSING')
+          # 7-Zip reads/extracts NSIS bytes; it does not execute setup/uninstall.
+          seven=Path(os.environ['ProgramFiles'])/'7-Zip/7z.exe'; regular(seven)
+          listing=run([str(seven),'l','-slt','-ba','-sccUTF-8',str(installer)],'listing').decode('utf-8-sig')
+          entries=[]
+          for block in re.split(r'\r?\n\r?\n',listing.strip()):
+              fields=dict(line.split(' = ',1) for line in block.splitlines() if ' = ' in line)
+              if 'Path' not in fields: continue
+              path=fields['Path'].replace('\\','/'); parts=path.split('/')
+              require(path and not PureWindowsPath(path).is_absolute() and ':' not in path and not any(p in ('','..','.') for p in parts),'PREVIEW_ARCHIVE_PATH_ESCAPE')
+              require(path.casefold() not in {p.casefold() for p,_ in entries},'PREVIEW_ARCHIVE_CASE_COLLISION')
+              entries.append((path,fields)); require(len(entries)<=64,'PREVIEW_ARCHIVE_INVENTORY_BOUND')
+          payload=set((*NATIVE,MANIFEST,*DOCS)); files={p for p,f in entries if f.get('Folder')!='+'}
+          require(payload<=files,'PREVIEW_ARCHIVE_PAYLOAD_MISSING')
+          require(all(p in payload or p=='uninstall.exe' or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files),'PREVIEW_UNEXPECTED_ARCHIVE_FILE')
+          require(sum(int(f.get('Size','0')) for p,f in entries)<=536870912,'PREVIEW_ARCHIVE_TOTAL_BOUND')
+          extracted=WORK/'extracted'; require(not extracted.exists(),'PREVIEW_EXTRACT_EXISTS')
+          run([str(seven),'x','-y','-sccUTF-8','-o'+str(extracted),str(installer)],'extract')
+          for p in extracted.rglob('*'): regular(p,p.is_dir())
+          require({name:measure(extracted/name) for name in NATIVE}==before and (extracted/MANIFEST).read_bytes()==manifest_raw,'PREVIEW_EXTRACTED_NATIVE_MISMATCH')
+          require({name:measure(extracted/name,262144) for name in DOCS}==docs,'PREVIEW_EXTRACTED_NOTICES_MISMATCH')
+          # Retain only allowlisted public outputs, never private generated paths,
+          # NSIS tools/plugins/uninstaller extraction, PDBs, logs or credentials.
+          artifact=RUNNER/'v02-preview-public-evidence'; require(not artifact.exists(),'PREVIEW_ARTIFACT_EXISTS'); artifact.mkdir()
+          for name in (*NATIVE,MANIFEST): shutil.copyfile(package/name,artifact/name)
+          for name in DOCS: shutil.copyfile(prepared/'notices'/name,artifact/name)
+          shutil.copyfile(installer,artifact/installer.name)
+          identities={name:measure(artifact/name,4096 if name==MANIFEST else 262144 if name in DOCS else MAX) for name in (*NATIVE,MANIFEST,*DOCS,installer.name)}
+          audit=dict(schemaVersion=1,classification='V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],profile='release',features=['preview-release'],target='x86_64-pc-windows-msvc',tauriCli='2.11.3',compiledManifestSha256=digest,manifest=manifest,files=identities,releaseHelperProtocol='PNG_JPEG_UNMARKED_ADD_INSPECT_PASS',nativeBytesUnchanged=True,hookIncluded=True,nsisStaticExtraction='PASS',setupExecution=0,uninstallExecution=0,ordinaryUiExecution=0,vendorInstallerExecution=0,signing='NOT_RUN',productionTrust=False,cleanWindowsValidation='NOT_RUN',runtimeIdentityScope='API_AVAILABILITY_ONLY_NOT_EXACT_RUNTIME_IDENTITY')
+          (artifact/'preview-audit.json').write_bytes(canonical(audit)+b'\n')
+          require({p.name for p in artifact.iterdir()}==set((*identities,'preview-audit.json')),'PREVIEW_PUBLIC_ARTIFACT_INVENTORY')
+          print('PREVIEW_NATIVE_NSIS_AUDIT: '+canonical(audit).decode('ascii'))
+          '@ | & .\.venv-py312\Scripts\python.exe -B -
+          if ($LASTEXITCODE -ne 0) { throw 'PREVIEW_STATIC_PACKAGE_AUDIT_FAILED' }
+
       - name: Final immutable-input/index checks and bounded native summary
         id: limited_final
         if: always()
@@ -658,7 +861,7 @@ jobs:
             $head = git rev-parse HEAD
             if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'FINAL_SOURCE_HEAD_CHANGED' }
             $locks = @{
-              'desktop/Cargo.lock' = 'f704b02621c9325d32735d35204438ae91a54ac3662376d709b9a99eb47977e7'
+              'desktop/Cargo.lock' = '0ff501939a8e7a77be3e261c4f10f64b3c85a1f40362958b186e42b9a8491a94'
               'tools/f3a-rust-sdk-parity/Cargo.lock' = '5ebd0ac43127f7bf2035fce1ec02ffae890a8acc79bf84066cba1f63da5de9b5'
             }
             foreach ($path in $locks.Keys) {
@@ -676,13 +879,15 @@ jobs:
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
             if ('${{ steps.product_native.outcome }}' -ne 'success' -or '${{ steps.product_web.outcome }}' -ne 'success') { throw 'PRODUCT_FLOW_VALIDATION_FAILED' }
             if ('${{ steps.explorer_native.outcome }}' -ne 'success') { throw 'EXPLORER_NATIVE_VALIDATION_FAILED' }
+            if ('${{ steps.preview_build.outcome }}' -ne 'success' -or '${{ steps.preview_package.outcome }}' -ne 'success') { throw 'PREVIEW_NATIVE_NSIS_VALIDATION_FAILED' }
+            'V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS: RELEASE_PUBLIC_TEST_CREDENTIALS; SETUP_UNINSTALL_UI_NOT_RUN'
             'V02_EXPLORER_CONTEXT_INTEGRATION_PASS: DEVELOPMENT_NATIVE_CONTRACTS; OWNER_EXPLORER_UI_SMOKE_NOT_RUN'
             'V02_RUST_PRODUCT_HELPER_EXTENSION_PASS'
             'V02_DEVELOPMENT_PACKAGE_ASSEMBLY_PASS'
             'V02_DEVELOPMENT_PACKAGE_RUNTIME_BINDING_PASS'
             'Limited Inspection native CI: PASS (not UI smoke or full lifecycle closure)' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / default debug', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; Desktop executable build only, no application launch', 'Python for regression fixtures and non-executing development byte assembly; no inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; executable-relative binding test: ${{ steps.limited_binding.outcome }}; installer assembly NOT RUN', 'Development package artifact: subsequent success-only upload step; exactly Desktop/helper/manifest, 3-day retention; no PDB/log/other JSON', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
+            @('Rust1.88.0 / windows-2025 / x86_64-pc-windows-msvc / accepted default debug plus explicit Preview release', 'Limited operation remains LIMITED_INSPECTION / INCOMPLETE; C2PA/CAWG INSPECTED; TrustMark NOT_CHECKED', 'Worker termination wait: see focused lifecycle test results; full supervisor failure closure not claimed', 'Runtime UI smoke: NOT RUN; no ordinary Desktop/setup/uninstall launch', 'Python for CI fixtures and package audits only; never shipped or used as inspection fallback', 'Development package assembly step: ${{ steps.limited_package.outcome }}; executable-relative binding test: ${{ steps.limited_binding.outcome }}', 'Preview release build/contracts: ${{ steps.preview_build.outcome }}; NSIS generation/static extraction audit: ${{ steps.preview_package.outcome }}; public test credentials are NOT Production Trust', 'Development and Preview artifacts: subsequent success-only uploads, 3-day retention; exact allowlisted files only; no private logs/PDB/source', 'Clean Windows / ordinary launch / installed Explorer / setup-uninstall lifecycle: NOT RUN', 'Production adoption: UNAPPROVED; Production Signing: PARKED; Distribution Compliance: NOT READY; Full F3A: NOT READY') >> $env:GITHUB_STEP_SUMMARY
             'DEVELOPMENT_PACKAGE_ARTIFACT: upload stage follows final validation; no upload claimed before it runs'
           }
 
@@ -695,6 +900,26 @@ jobs:
             ${{ runner.temp }}/v02-development-assembly-evidence/package-a/shirushi-desktop.exe
             ${{ runner.temp }}/v02-development-assembly-evidence/package-a/shirushi-inspection-helper.exe
             ${{ runner.temp }}/v02-development-assembly-evidence/package-a/inspection-helper.manifest.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Retain statically audited Preview native package and NSIS for Owner Review
+        if: ${{ success() && steps.limited_final.outcome == 'success' && steps.preview_package.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository pin
+        with:
+          name: shirushi-v02-preview-native-nsis-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/v02-preview-public-evidence/shirushi-desktop.exe
+            ${{ runner.temp }}/v02-preview-public-evidence/shirushi-inspection-helper.exe
+            ${{ runner.temp }}/v02-preview-public-evidence/inspection-helper.manifest.json
+            ${{ runner.temp }}/v02-preview-public-evidence/README.md
+            ${{ runner.temp }}/v02-preview-public-evidence/DISCLAIMER.md
+            ${{ runner.temp }}/v02-preview-public-evidence/PRIVACY.md
+            ${{ runner.temp }}/v02-preview-public-evidence/THIRD_PARTY_NOTICES.md
+            ${{ runner.temp }}/v02-preview-public-evidence/Shirushi Preview_0.2.0-preview.1_x64-setup.exe
+            ${{ runner.temp }}/v02-preview-public-evidence/preview-audit.json
           if-no-files-found: error
           retention-days: 3
           overwrite: false

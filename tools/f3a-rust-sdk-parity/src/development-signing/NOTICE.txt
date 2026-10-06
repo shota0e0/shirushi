@@ -3,7 +3,11 @@ Copied from contentauth/c2pa-rs tag c2pa-v0.85.0:
 sdk/tests/fixtures/certs/es256.pub and es256.pem.
 https://github.com/contentauth/c2pa-rs/tree/c2pa-v0.85.0/sdk/tests/fixtures/certs
 Upstream SDK copyright Adobe; MIT or Apache-2.0, at your option.
-Used ONLY when cfg(debug_assertions) for development metadata Add.
+Used ONLY when cfg(debug_assertions) or the explicitly selected preview-release
+Cargo feature for Owner-approved v0.2 Preview metadata Add.
+Public Preview does not establish Production Trust, author/copyright proof,
+trusted publisher identity or trusted C2PA signing. developmentSigning remains
+true; inspection trustValidated remains false.
 The certificate says FOR TESTING_ONLY. No trust roots are imported.
 These signatures prove preview integrity, NOT trusted publisher identity.
 No TSA, OCSP or network access is used by this helper signing path.

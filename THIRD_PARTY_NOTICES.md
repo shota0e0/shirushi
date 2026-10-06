@@ -1,5 +1,22 @@
 # Shirushi 第三者コンポーネントに関する表示
 
+## v0.2 — 公開前のnotice対象と未完事項
+
+v0.2はRust Desktop/helperの公開candidateを準備中です。Development artifactの3ファイルauditは、そのバイナリに静的／間接に含まれる第三者componentのnotice充足を証明しません。現時点でDistribution Compliance READYとはしません。
+
+最終配布物のsource revision・Cargo locks・toolchain・ファイルhashと実際のcomponent構成に対して、少なくとも以下を対応付けます。
+
+- Desktop/Tauriと実際にリンク／生成された依存component、WebView2 SDK/runtime関連の適用条件。
+- Rust helperのc2pa-rs `0.85.0`、native crypto/image依存、実際に含まれる各componentのlicense／notice。
+- c2pa由来MPL対象sourceとsource-availability条件。既存のexact source evidenceは[凍結記録](packaging/license_sources/inspection-helper/c2pa-mpl/README.md)にありますが、そのsubsetだけで最終配布上の充足を断定しません。
+- UIに含まれるUnicode 16.0データとUnicode License v3。不要なdot fontは製品commit／packageへ追加しません。
+- 同梱する場合の正確なMicrosoft VC/WebView2 offline candidateと再配布条件。現在はCANDIDATEで、開発用のidentity確認は公開再配布承認ではありません。
+- v0.2 Previewで採用する既存の公開テスト署名資格情報の出所／noticeとPreview用途。第三者も使用できるテスト資格情報であり、Production/private署名情報や作者本人性として説明しません。
+
+旧v0.1のPython／PyInstaller／c2patool／TrustMark一覧を、v0.2の実配布構成として流用しません。最終artifactがないため、除外／同梱と適用noticeの確定・完成は未実施です。下記はv0.1と既存repository素材の履歴です。
+
+---
+
 この文書は、Shirushi v0.1で使用する第三者コンポーネントについて、現在の配布上の取り扱いを記録するものです。トップレベルのMIT Licenseは、`Copyright (c) 2026 しょたお`の下で公開するShirushi独自のソースコードに適用されます。第三者のソフトウェア、バイナリ、モデル、証明書、その他の素材に適用されるライセンスや表示を置き換えたり、別のライセンスへ変更したりするものではありません。各コンポーネントには、それぞれの開発元が定めるライセンスと表示が適用されます。
 
 必要な表示は、実際の配布パッケージに含まれる内容によって決まります。リリース候補では、実ファイル一覧とSHA-256を作成し、その内容に対応する開発元のライセンスおよび表示を`LICENSES/`へ収録します。

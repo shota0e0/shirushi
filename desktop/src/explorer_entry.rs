@@ -146,7 +146,7 @@ impl ExplorerEntry {
 }
 
 fn resolve(request: Request) -> Result<(Value, Option<LaunchClaim>), BridgeError> {
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     {
         let path = std::path::Path::new(&request.path);
         // Existing local fixed-drive, ancestor and source reparse guards remain
@@ -176,7 +176,7 @@ fn resolve(request: Request) -> Result<(Value, Option<LaunchClaim>), BridgeError
         }
         Ok((image, Some(claim)))
     }
-    #[cfg(not(all(windows, debug_assertions)))]
+    #[cfg(not(all(windows, any(debug_assertions, feature = "preview-release"))))]
     {
         let _ = request;
         Err(error("DEV_CANARY_ONLY"))
@@ -432,7 +432,7 @@ mod tests {
 
     // These tests invoke the actual image handoff, not the injected resolver.
     // No Desktop, helper, shell, or other executable is launched.
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     mod native {
         use super::*;
         use base64::{engine::general_purpose::STANDARD, Engine};

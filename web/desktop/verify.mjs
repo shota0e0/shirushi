@@ -4,7 +4,7 @@ import { resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DesktopAdapter } from "../adapters/desktop-adapter.js";
 import { BrowserFoundationAdapter } from "../adapters/browser-foundation-adapter.js";
-import { DesktopBridgeError, validateDesktopCapabilities, validateDesktopMarkRead } from "./contract.js";
+import { DesktopBridgeError, PREVIEW_AUTHORITY, validateDesktopCapabilities, validateDesktopMarkRead } from "./contract.js";
 import { createDesktopTransport } from "./transport.js";
 import { createBridgeController } from "./controller.js";
 import { bridgePresentationModel } from "./presentation.js";
@@ -32,6 +32,27 @@ const handwritten = { ...absent, state: "v2", sourceVersion: 2, mark: { version:
 const legacy = { ...absent, state: "legacy_v1", sourceVersion: 1, geometryProvenance: "legacy-unknown", payload: { version: 1, type: "handwritten", strokes: [{ points: [{ x: .2, y: .3, t: 0 }] }] } };
 
 const accepted = validateDesktopCapabilities(caps);
+const previewCaps = { bridgeProtocolVersion: 1, authority: PREVIEW_AUTHORITY,
+  personalMarkSchemaVersions: [1], renderProfiles: [], capabilities: {
+    personalMarkRead:false,personalMarkWrite:false,nativeTargetSelection:true,
+    coreAdd:true,coreVerify:true,coreReadback:false,c2paPersonalMarkEmbedding:true,explorerIntegration:true } };
+const previewRead = { contract:"shirushi-personal-mark-session",contractVersion:1,state:"absent" };
+check(validateDesktopCapabilities(previewCaps).authority === PREVIEW_AUTHORITY, "explicit native Preview authority accepted");
+for (const mutation of [x=>{x.extra=true;},x=>{x.authority="PRODUCTION_TRUST";},x=>{x.capabilities.personalMarkRead=true;},
+  x=>{x.capabilities.personalMarkWrite=true;},x=>{x.personalMarkSchemaVersions=[1,2];},x=>{x.renderProfiles=[{}];}]) {
+  const bad=copy(previewCaps);mutation(bad);throws(()=>validateDesktopCapabilities(bad),"native Preview authority cannot inflate capabilities");
+}
+check(validateDesktopMarkRead(previewRead,PREVIEW_AUTHORITY).source === PREVIEW_AUTHORITY,"native absence never claims Python authority");
+throws(()=>validateDesktopMarkRead(previewRead),"native mark cannot enter Python reader");
+throws(()=>validateDesktopMarkRead(absent,PREVIEW_AUTHORITY),"Python mark cannot enter native session reader");
+throws(()=>validateDesktopMarkRead({...previewRead,state:"v2"},PREVIEW_AUTHORITY),"native session cannot fabricate stored mark");
+const previewTransport={getCapabilities:async()=>copy(previewCaps),loadPersonalMark:async()=>copy(previewRead),
+  selectImage:async()=>null,readImage:async()=>null,productOperation:async()=>null};
+await rejects(()=>new DesktopAdapter(previewTransport).getCapabilities(),"legacy adapter rejects native product authority");
+const nativeAdapter=new DesktopAdapter(previewTransport,{productFlow:true});
+await nativeAdapter.getCapabilities();
+check((await nativeAdapter.loadPersonalMark()).source===PREVIEW_AUTHORITY,"native product uses session-only mark boundary");
+check(nativeAdapter.loadSessionMark()===null,"first Preview session does not invent a mark");
 check(Object.isFrozen(accepted) && Object.isFrozen(accepted.capabilities) && Object.isFrozen(accepted.renderProfiles[0]), "detached immutable negotiation");
 caps.renderProfiles[0].id = "changed";
 check(accepted.renderProfiles[0].id === "shirushi-typed", "capability object detached from source");

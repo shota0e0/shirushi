@@ -21,7 +21,30 @@ const CAPABILITIES = Object.freeze({
   c2paPersonalMarkEmbedding: false, explorerIntegration: false,
 });
 
+export const PREVIEW_AUTHORITY = "NATIVE_PREVIEW_SESSION_ONLY";
+const PREVIEW_CAPABILITIES = Object.freeze({
+  personalMarkRead: false, personalMarkWrite: false, nativeTargetSelection: true,
+  coreAdd: true, coreVerify: true, coreReadback: false,
+  c2paPersonalMarkEmbedding: true, explorerIntegration: true,
+});
+
+function validatePreviewCapabilities(value) {
+  exact(value, ["bridgeProtocolVersion", "authority", "personalMarkSchemaVersions", "renderProfiles", "capabilities"]);
+  if (value.authority !== PREVIEW_AUTHORITY || value.bridgeProtocolVersion !== 1
+      || !Array.isArray(value.personalMarkSchemaVersions) || value.personalMarkSchemaVersions.length !== 1
+      || value.personalMarkSchemaVersions[0] !== 1 || !Array.isArray(value.renderProfiles) || value.renderProfiles.length !== 0) {
+    throw new DesktopBridgeError("INCOMPATIBLE_BRIDGE");
+  }
+  exact(value.capabilities, Object.keys(PREVIEW_CAPABILITIES));
+  for (const [name, expected] of Object.entries(PREVIEW_CAPABILITIES)) {
+    if (value.capabilities[name] !== expected) throw new DesktopBridgeError("INCOMPATIBLE_BRIDGE");
+  }
+  return Object.freeze({ bridgeProtocolVersion: 1, authority: PREVIEW_AUTHORITY,
+    personalMarkSchemaVersions: Object.freeze([1]), renderProfiles: Object.freeze([]), capabilities: PREVIEW_CAPABILITIES });
+}
+
 export function validateDesktopCapabilities(value) {
+  if (value?.authority === PREVIEW_AUTHORITY) return validatePreviewCapabilities(value);
   exact(value, ["bridgeProtocolVersion", "personalMarkSchemaVersions", "renderProfiles", "capabilities"]);
   if (value.bridgeProtocolVersion !== 1
       || !Array.isArray(value.personalMarkSchemaVersions)
@@ -45,7 +68,14 @@ export function validateDesktopCapabilities(value) {
   });
 }
 
-export function validateDesktopMarkRead(value) {
+export function validateDesktopMarkRead(value, authority = null) {
+  if (authority === PREVIEW_AUTHORITY) {
+    exact(value, ["contract", "contractVersion", "state"]);
+    if (value.contract !== "shirushi-personal-mark-session" || value.contractVersion !== 1 || value.state !== "absent") {
+      throw new DesktopBridgeError("INVALID_MARK_READ_RESULT");
+    }
+    return Object.freeze({ state: "ABSENT", source: PREVIEW_AUTHORITY });
+  }
   try { return validatePythonReadEnvelope(value); }
   catch { throw new DesktopBridgeError("INVALID_MARK_READ_RESULT"); }
 }

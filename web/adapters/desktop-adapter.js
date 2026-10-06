@@ -1,6 +1,6 @@
 import { BrowserFoundationAdapter } from "./browser-foundation-adapter.js";
 import { freezeCapabilities, unsupported } from "../contracts.js";
-import { DesktopBridgeError, validateDesktopCapabilities, validateDesktopMarkRead } from "../desktop/contract.js";
+import { DesktopBridgeError, PREVIEW_AUTHORITY, validateDesktopCapabilities, validateDesktopMarkRead } from "../desktop/contract.js";
 import { inspectionUiOutcome, localPath, strictUiMark, validateAddResult, validateImageRecord } from "../desktop/product-flow.js";
 
 /** Local File/blob preview is reusable presentation, NOT a native Core target. */
@@ -8,6 +8,7 @@ export class DesktopAdapter extends BrowserFoundationAdapter {
   capabilities = freezeCapabilities({ localImagePreview: true, sessionMarkEdit: false });
   #transport;
   #negotiated = false;
+  #authority = null;
   #productFlow = false;
   #selected = null;
   #active = false;
@@ -53,14 +54,17 @@ export class DesktopAdapter extends BrowserFoundationAdapter {
 
   async getCapabilities() {
     this.#negotiated = false;
+    this.#authority = null;
     const result = validateDesktopCapabilities(await this.#transport.getCapabilities());
+    if (result.authority === PREVIEW_AUTHORITY && !this.#productFlow) throw new DesktopBridgeError("INCOMPATIBLE_BRIDGE");
+    this.#authority = result.authority ?? null;
     this.#negotiated = true;
     return result;
   }
 
   async loadPersonalMark() {
     if (!this.#negotiated) throw new DesktopBridgeError("BRIDGE_NOT_READY");
-    return validateDesktopMarkRead(await this.#transport.loadPersonalMark());
+    return validateDesktopMarkRead(await this.#transport.loadPersonalMark(), this.#authority);
   }
 
   async #operation(operation, targetReference, mark = null) {

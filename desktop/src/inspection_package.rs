@@ -1,4 +1,4 @@
-//! DEVELOPMENT CANARY ONLY: trusted Rust test injection, not Production discovery.
+//! Fixed flat helper package: debug Canary or explicitly selected public Preview.
 //! Exact-package integrity is not publisher authenticity or kernel image-section proof.
 #![allow(unexpected_cfgs)] // Explicit CI cfg; no Cargo feature/dependency surface.
 use crate::inspection_supervisor::FixedExecutable;
@@ -215,7 +215,7 @@ pub(crate) struct VerifiedHelper {
     id: FileIdentity,
     checked: AtomicBool,
     failed: AtomicBool,
-    #[cfg(shirushi_release_helper_native_inventory)]
+    #[cfg(all(debug_assertions, shirushi_release_helper_native_inventory))]
     native_inventory: std::sync::Mutex<Option<Arc<native_inventory::Observer>>>,
 }
 impl VerifiedHelper {
@@ -249,7 +249,7 @@ impl VerifiedHelper {
         let ok = check().is_ok();
         self.checked.store(ok, Ordering::SeqCst);
         self.failed.store(!ok, Ordering::SeqCst);
-        #[cfg(shirushi_release_helper_native_inventory)]
+        #[cfg(all(debug_assertions, shirushi_release_helper_native_inventory))]
         if ok {
             let observation = self
                 .native_inventory
@@ -264,16 +264,53 @@ impl VerifiedHelper {
     }
 }
 
-/// No release-build constructor, env override, frontend path, or discovery.
-/// The expected digest is a trusted test/build input OUTSIDE this package tree.
+/// Debug injection and public Preview share the same byte/identity verifier.
+/// Release Preview exposes only the OS executable / compiled-digest constructor.
 pub struct CanaryPackage(Arc<VerifiedHelper>);
 impl std::fmt::Debug for CanaryPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CanaryPackage(REDACTED)")
     }
 }
+
+#[cfg(all(test, feature = "preview-release"))]
+mod preview_authority_tests {
+    use super::*;
+    #[test]
+    fn preview_manifest_digest_is_an_explicit_canonical_compiled_input() {
+        assert!(canonical_hash(env!(
+            "SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256"
+        )));
+        assert!(!canonical_hash(""));
+        assert!(!canonical_hash(&"A".repeat(64)));
+        assert_eq!(HELPER_BASENAME, "shirushi-inspection-helper.exe");
+        assert_eq!(MANIFEST_BASENAME, "inspection-helper.manifest.json");
+    }
+}
 impl CanaryPackage {
+    #[cfg(debug_assertions)]
     pub fn preflight(root: &Path, expected_manifest_sha256: &str) -> Result<Self, PackageFailure> {
+        Self::preflight_bound(root, expected_manifest_sha256)
+    }
+    /// Explicit Preview authority. Neither caller paths nor runtime environment
+    /// can replace the expected manifest digest or executable-relative root.
+    #[cfg(feature = "preview-release")]
+    pub fn from_current_executable() -> Result<Self, PackageFailure> {
+        let bad = PackageFailure::PackageIntegrityFailure;
+        let executable = std::env::current_exe().map_err(|_| bad)?;
+        let root = executable.parent().ok_or(bad)?;
+        let package =
+            Self::preflight_bound(root, env!("SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256"))?;
+        let metadata = std::fs::symlink_metadata(&executable).map_err(|_| bad)?;
+        if !metadata.is_file() || metadata.file_attributes() & REPARSE != 0 {
+            return Err(bad);
+        }
+        Ok(package)
+    }
+    fn preflight_bound(
+        root: &Path,
+        expected_manifest_sha256: &str,
+    ) -> Result<Self, PackageFailure> {
         let bad = PackageFailure::PackageIntegrityFailure;
         if !canonical_hash(expected_manifest_sha256) {
             return Err(bad);
@@ -309,7 +346,7 @@ impl CanaryPackage {
             id,
             checked: AtomicBool::new(false),
             failed: AtomicBool::new(false),
-            #[cfg(shirushi_release_helper_native_inventory)]
+            #[cfg(all(debug_assertions, shirushi_release_helper_native_inventory))]
             native_inventory: std::sync::Mutex::new(None),
         })))
     }
@@ -327,7 +364,7 @@ impl CanaryPackage {
     }
     /// Explicit CI-only evidence. The guard must be finished after inspect returns;
     /// dropping it also stops and joins the worker. No runtime environment opt-in.
-    #[cfg(shirushi_release_helper_native_inventory)]
+    #[cfg(all(debug_assertions, shirushi_release_helper_native_inventory))]
     #[doc(hidden)]
     pub fn observe_native_modules_for_canary(
         &self,
@@ -348,6 +385,7 @@ impl CanaryPackage {
     /// Trusted Rust negative-test injection ONLY; deliberately mismatches two
     /// independently verified package files. Absent from all release builds.
     #[doc(hidden)]
+    #[cfg(debug_assertions)]
     pub fn mismatched_identity_configuration_for_canary(&self, other: &Self) -> FixedExecutable {
         FixedExecutable::verified_canary(self.0.path.clone(), other.0.clone())
     }
@@ -355,7 +393,7 @@ impl CanaryPackage {
 
 // Compiled only in the debug Windows package module AND this explicit CI cfg.
 // No production discovery, arbitrary PID, process enumeration, or OpenProcess.
-#[cfg(shirushi_release_helper_native_inventory)]
+#[cfg(all(debug_assertions, shirushi_release_helper_native_inventory))]
 pub mod native_inventory {
     use super::*;
     use crate::inspection_supervisor::Control;

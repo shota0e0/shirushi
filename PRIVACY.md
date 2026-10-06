@@ -1,5 +1,22 @@
 # しるし / Shirushi プライバシー情報
 
+## v0.2 Release preparation — 現在のRust経路
+
+v0.2は公開前です。この節はCIで検証されたDevelopment Product Flowの実装を対象とし、将来のinstallerやWindows全体の通信挙動を保証しません。
+
+- 入力はユーザー選択／Explorerで指定したローカルPNG/JPEGです。画像bytes・path・SHAはDesktop/helper間のローカル処理に使用し、画像upload処理は実装していません。
+- 出力は元画像の隣の`_rights`別ファイルです。固定Rights IntentとPersonal Mark情報をmetadataに含みます。サインの見た目・motionをpixelsへ焼き込みません。
+- Personal Mark編集は現在session-onlyです。出力metadataに含まれる文字や手書き情報は、その画像を渡した相手が読み取れる可能性があります。作者本人性や秘密性を提供しません。
+- Rust Add／Limited InspectionはTrustMarkモデルやPython ML runtimeを使いません。現在のC2PA設定は外部manifest・OCSP取得を無効にし、遠隔manifestを限定検査の対象にしません。Windows／WebView2／vendor runtimeの更新や通信は別です。
+- Addの中間ファイルは元画像のフォルダー内の専用stageへ置き、正常終了・エラー時にbounded cleanupします。強制終了・電源断時に残る可能性はあります。ソース画像・他ファイルを広く削除するfallbackはありません。
+- Explorer登録は拡張子限定のShirushi-owned per-user項目だけです。公開installer／uninstallerは未検証であり、画像・共有vendor runtimeを削除することは想定しません。
+
+旧Python GUIの`creator_service.log`やTrustMarkモデルcacheの説明を、そのままv0.2 Rust packageの配布／保存仕様と読み替えないでください。公開candidateのWebView2 user-data／installer log等は、実installerの検証時に場所と保持範囲を確定してこの節へ反映します。未確認部分を「保存しない」とは主張しません。
+
+以下は公開済みv0.1 Previewのデータ取り扱いです。
+
+---
+
 ## 対象範囲
 
 この文書は、Shirushi v0.1 PreviewをWindows上でローカルに使用する場合の、現在の実装におけるデータの取り扱いを説明します。将来のバージョンや配布形態で挙動が変わる場合は、この文書も更新します。

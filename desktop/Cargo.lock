@@ -2793,6 +2793,8 @@ dependencies = [
  "sha2",
  "tauri",
  "tauri-build",
+ "webview2-com-sys",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
 ]
 

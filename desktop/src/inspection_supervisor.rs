@@ -219,7 +219,7 @@ pub struct FixedExecutable {
     executable: std::path::PathBuf,
     arguments: Vec<std::ffi::OsString>,
     test_marker: Option<String>,
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     verified_helper: Option<Arc<crate::inspection_package::VerifiedHelper>>,
 }
 impl std::fmt::Debug for FixedExecutable {
@@ -228,17 +228,19 @@ impl std::fmt::Debug for FixedExecutable {
     }
 }
 impl FixedExecutable {
+    #[cfg(debug_assertions)]
     pub fn new(executable: std::path::PathBuf) -> Self {
         Self {
             executable,
             arguments: Vec::new(),
             test_marker: None,
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
             verified_helper: None,
         }
     }
     /// Explicit development-only synthetic process fixture configuration.
     /// Fixed test harness arguments/marker, never shell command passthrough.
+    #[cfg(debug_assertions)]
     pub fn synthetic_test_child(executable: std::path::PathBuf, marker: SyntheticBehavior) -> Self {
         Self {
             executable,
@@ -248,11 +250,11 @@ impl FixedExecutable {
                 "--nocapture".into(),
             ],
             test_marker: Some(marker.code().to_owned()),
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
             verified_helper: None,
         }
     }
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "preview-release")))]
     pub(crate) fn verified_canary(
         executable: std::path::PathBuf,
         guard: Arc<crate::inspection_package::VerifiedHelper>,
@@ -277,6 +279,7 @@ impl FixedExecutable {
 }
 /// Closed development fixture behavior; not a Production runtime override.
 #[derive(Clone, Copy)]
+#[cfg(debug_assertions)]
 pub enum SyntheticBehavior {
     Success,
     Failure,
@@ -290,6 +293,7 @@ pub enum SyntheticBehavior {
     DelayedSuccess,
     LeakyChild,
 }
+#[cfg(debug_assertions)]
 impl SyntheticBehavior {
     fn code(self) -> &'static str {
         match self {
@@ -625,7 +629,7 @@ mod windows {
         // SAFETY: live owned child and Job handles; child cannot execute before assignment.
         let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } != 0;
         let ready = if assigned {
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "preview-release"))]
             if let Some(guard) = &configuration.verified_helper {
                 if !guard.verify_child(&child) {
                     Err(ServiceFailure::ServiceUnavailable)
@@ -633,9 +637,16 @@ mod windows {
                     resume(&child)
                 }
             } else {
-                resume(&child)
+                #[cfg(debug_assertions)]
+                {
+                    resume(&child)
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    Err(ServiceFailure::ServiceUnavailable)
+                }
             }
-            #[cfg(not(debug_assertions))]
+            #[cfg(not(any(debug_assertions, feature = "preview-release")))]
             resume(&child)
         } else {
             Err(ServiceFailure::ServiceUnavailable)
@@ -922,7 +933,7 @@ mod windows {
         if !configuration.executable.is_absolute() {
             return failed(ServiceFailure::ServiceUnavailable);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "preview-release"))]
         if let Some(guard) = &configuration.verified_helper {
             guard.begin();
         }

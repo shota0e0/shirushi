@@ -7,6 +7,10 @@ publish = false
 
 [workspace]
 
+[features]
+default = []
+preview-release = []
+
 [dependencies]
 c2pa = { version = "=0.85.0", default-features = false, features = ["rust_native_crypto"] }
 serde = { version = "1", features = ["derive"] }

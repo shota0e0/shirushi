@@ -7,10 +7,10 @@ const adapter = new DesktopAdapter(transport, { productFlow:true });
 const presentation = {
   render({ elements, locale }) {
     const note = locale === "ja"
-      ? "Development · Rust Add / Limited Inspection · INCOMPLETE · TrustMark NOT_CHECKED · 元画像は変更しません"
-      : "Development · Rust Add / Limited Inspection · INCOMPLETE · TrustMark NOT_CHECKED · source preserved";
+      ? "Preview · 公開テスト資格情報（作者・著作権の証明ではありません）· Limited Inspection / INCOMPLETE · 元画像は変更しません"
+      : "Preview · public test credentials (not author/copyright proof) · Limited Inspection / INCOMPLETE · source preserved";
     elements.devBanner.hidden = false;
-    elements.devBanner.textContent = "Shirushi DEVELOPMENT";
+    elements.devBanner.textContent = "Shirushi v0.2 Preview · TEST CREDENTIALS · NO PRODUCTION TRUST";
     elements.capabilityNote.textContent = note;
     elements.root.querySelector("footer").textContent = note;
     elements.detailsDialog.querySelector(".details-body").textContent = note;

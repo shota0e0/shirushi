@@ -1,5 +1,27 @@
 # しるし / Shirushi
 
+## v0.2 Preview — Release preparation（公開前）
+
+v0.2は現在Release Closure中です。公開用installer／release candidateはまだ提供していません。以下は承認済みDevelopment実装の説明であり、後述のv0.1ダウンロードをv0.2として扱わないでください。
+
+- Windows x64でPNG/JPEGへ固定の「AI学習・生成利用を希望しない」をC2PA/CAWG metadataとして記録し、元画像とは別の`_rights`ファイルを生成します。元画像・既存出力は上書きしません。
+- 「しるしを確認する」は**Limited Inspection / INCOMPLETE**です。C2PA/CAWGを対象にし、TrustMarkは`NOT_CHECKED`。完全なprovenance、作者本人性、著作権、AIサービスの遵守を保証しません。
+- 手書き／文字のPersonal MarkとmotionはUI表示です。Personal Mark情報はmetadataに含みますが、見た目のサインや発光を画像pixelsへ焼き込みません。選択は現在session-onlyです。
+- 5言語（日本語／English／简体中文／繁體中文／한국어）と単一画像のExplorer Add／Verify入口を備えます。実Explorerメニュー操作・公開installer・clean Windows実機検証は未完です。
+- 現在のRust画像処理はローカルで行い、TrustMarkモデル取得は使いません。限定検査は外部manifest取得・OCSP取得を無効にしています。OS/WebView2等の通信までゼロと保証する意味ではありません。
+
+Development build・Product Flow・Explorer契約はWindows CIで検証済みですが、public release-profile buildや通常の実機install/launchの証明とは異なります。v0.2 Previewは既存の**公開テストC2PA資格情報**を使います。第三者も利用できるテスト資格情報であり、Production Trust、作者本人性、著作権保有の証明にはなりません。Windows executableのコード署名とも別です。
+
+公開channelはPreview、installer baselineはWindows x64・Tauri NSIS・per-userです。per-userはShirushi本体のinstall scopeであり、VC Runtime／WebView2まで管理者不要と約束するものではありません。未準備のprerequisiteを無視して起動しません。
+
+公開build、installer、Windows発行元信頼、clean Windows、適用noticesの残作業は[凍結scopeとRelease Closure](docs/development/v02-scope-freeze-release-preparation.md)、公開前の変更点と信頼境界は[v0.2 Preview release notes](docs/RELEASE_NOTES_V02_PREVIEW.md)にまとめています。公開済みinstallerやRC検証完了を意味しません。
+
+Windowsが実行をブロックした場合は停止してください。セキュリティを無効化する、ファイルをunblockする、別launcherを使う、自己署名rootを追加する手順は案内しません。
+
+---
+
+## 公開済みv0.1 Preview — 以下は旧版の説明
+
 **作品に利用意思を残す**
 
 Shirushi v0.1 Previewは、画像へAI利用に関する意思を機械可読な形式で記録し、後から確認できるWindows向けツールです。
@@ -20,9 +42,7 @@ Windows 64bit版のShirushi v0.1 Preview.1は、次のZIPファイルからダ�
 
 v0.1 Previewでは、Windows向けの正式なコード署名を行っていません。そのため、初回起動時にWindowsの警告が表示される場合があります。
 
-警告画面で「詳細情報」を選択し、続いて「実行」を選択してください。Windowsのバージョンや設定によって、表示が異なる場合があります。
-
-![Windowsの警告からShirushiを起動する手順](https://raw.githubusercontent.com/shota0e0/shirushi/main/docs/images/windows-smartscreen-guide.png)
+警告や実行拒否が表示された場合は起動を停止し、配布元・対象version・発行元情報を確認してください。ブロックを回避するための設定変更や代替起動は案内しません。Windowsのバージョンやpolicyによって動作は異なり、未署名版をすべての環境で起動できるとは保証しません。
 
 GitHubの「Code」から選べる「Download ZIP」はソースコードです。アプリを使う場合は、上記のRelease版ZIPをダウンロードしてください。
 
@@ -36,7 +56,7 @@ Shirushi v0.1 Previewの配布パッケージは、Windows x64向けのZIP形式
 
 ZIP内から直接起動せず、必ず展開したフォルダー内の`Shirushi.exe`を使用してください。`Shirushi.exe`だけを別の場所へ移動せず、展開したフォルダーはそのままの構成で使用してください。
 
-現行の`Shirushi.exe`にはWindowsのコード署名を行っていません。Windowsが発行元を確認できない旨を表示した場合は、入手元とファイルを確認し、信頼できる場合だけ実行してください。
+公開済みv0.1の`Shirushi.exe`にはWindowsのコード署名を行っていません。これはv0.2の公開信頼方針や通常起動が検証済みという意味ではありません。実行がブロックされた場合は停止してください。
 
 ## Shirushiでできること
 
