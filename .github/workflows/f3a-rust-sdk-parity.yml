@@ -8,6 +8,7 @@ on:
       - docs/development/f3a-rust-sdk-parity*
       - .github/workflows/f3a-rust-sdk-parity.yml
       - desktop/src/limited_inspection.rs
+      - desktop/src/inspection_supervisor.rs
       - desktop/src/lib.rs
       - desktop/tests/limited_inspection.rs
   workflow_dispatch:
