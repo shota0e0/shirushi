@@ -9,6 +9,9 @@ on:
       - .github/workflows/f3a-rust-sdk-parity.yml
       - desktop/src/limited_inspection.rs
       - desktop/src/inspection_supervisor.rs
+      - desktop/src/explorer_entry.rs
+      - scripts/explorer_context_v02.py
+      - tests/test_explorer_context_v02.py
       - desktop/src/lib.rs
       - desktop/tests/limited_inspection.rs
   workflow_dispatch:
@@ -277,6 +280,26 @@ jobs:
           & .\.venv-py312\Scripts\python.exe -B -m unittest tests.test_inspection_application
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           'PRODUCT_WEB_REGRESSIONS: PASS; SYNTHETIC_TRANSPORT_NOT_NATIVE_SMOKE; EXISTING_PYTHON_REGRESSIONS_ONLY'
+
+      - name: Prove Explorer native handoff and isolated registration ownership
+        id: explorer_native
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $log = Join-Path $env:RUNNER_TEMP 'explorer-native-contract.log'
+          cargo +1.88.0 test --locked --offline --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --lib explorer_entry::tests -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-Item -LiteralPath $log).Length -gt 2097152) { throw 'EXPLORER_TEST_LOG_BOUND' }
+          $control = [IO.File]::ReadAllText($log)
+          if ($control -notmatch 'test result: ok\. 12 passed; 0 failed;' -or $control -notmatch 'native_take_reads_png_jpeg_for_both_operations_once' -or $control -notmatch 'native_independent_entries_reject_concurrent_duplicate' -or $control -notmatch 'native_take_rejects_malformed_unsupported_and_mismatched_images') { throw 'EXPLORER_NATIVE_TESTS_NOT_EXECUTED' }
+          $env:SHIRUSHI_EXPLORER_REGISTRY_CI = '1'
+          $env:SHIRUSHI_EXPLORER_NATIVE_DESKTOP = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/debug/shirushi-desktop.exe'
+          $env:SHIRUSHI_EXPLORER_NATIVE_DESKTOP_SHA256 = (Get-FileHash -LiteralPath $env:SHIRUSHI_EXPLORER_NATIVE_DESKTOP -Algorithm SHA256).Hash.ToLowerInvariant()
+          & .\.venv-py312\Scripts\python.exe -B -m unittest tests.test_explorer_context_v02 tests.test_desktop_bridge -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'EXPLORER_NATIVE_CONTRACT: 12_RUST_TESTS_PASS; REAL_PNG_JPEG_BOTH_INTENTS; SOURCE_UNCHANGED; ONE_SHOT; DUPLICATE_REJECTED; NO_DESKTOP_UI_LAUNCH'
+          'EXPLORER_REGISTRATION_SCOPE: CI_NONCE_HKCU_ONLY; OWNER_PC_UNCHANGED; ACTUAL_EXPLORER_UI_NOT_RUN'
 
       - name: Assemble and independently audit actual same-job development bytes
         id: limited_package
@@ -652,6 +675,8 @@ jobs:
             if (@($required | Where-Object { $_ -ne 'success' }).Count) { throw 'LIMITED_INSPECTION_NATIVE_CI_PRECEDING_STEP_FAILED' }
             'LIMITED_INSPECTION_NATIVE_CI_RESULT: LIMITED_INSPECTION_NATIVE_CI_PASS'
             if ('${{ steps.product_native.outcome }}' -ne 'success' -or '${{ steps.product_web.outcome }}' -ne 'success') { throw 'PRODUCT_FLOW_VALIDATION_FAILED' }
+            if ('${{ steps.explorer_native.outcome }}' -ne 'success') { throw 'EXPLORER_NATIVE_VALIDATION_FAILED' }
+            'V02_EXPLORER_CONTEXT_INTEGRATION_PASS: DEVELOPMENT_NATIVE_CONTRACTS; OWNER_EXPLORER_UI_SMOKE_NOT_RUN'
             'V02_RUST_PRODUCT_HELPER_EXTENSION_PASS'
             'V02_DEVELOPMENT_PACKAGE_ASSEMBLY_PASS'
             'V02_DEVELOPMENT_PACKAGE_RUNTIME_BINDING_PASS'

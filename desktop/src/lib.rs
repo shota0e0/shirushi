@@ -3,6 +3,7 @@ compile_error!("the manual-canary feature is DEVELOPMENT CANARY only and must no
 
 #[cfg(test)]
 mod asset_stage;
+mod explorer_entry;
 mod host;
 // Host-owned inspection boundary; development command reuses this supervisor.
 pub mod inspection_protocol;
@@ -113,6 +114,18 @@ async fn bridge_read_image(input_path: String) -> Result<Value, BridgeError> {
 }
 
 #[tauri::command]
+async fn bridge_take_explorer_request(
+    state: tauri::State<'_, explorer_entry::ExplorerEntry>,
+) -> Result<Option<Value>, BridgeError> {
+    let entry = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || entry.take())
+        .await
+        .map_err(|_| {
+            BridgeError::new("EXPLORER_TASK_FAILED", "Explorer handoff did not complete")
+        })?
+}
+
+#[tauri::command]
 async fn bridge_product_operation(
     state: tauri::State<'_, limited_inspection::LimitedInspectionRuntime>,
     request: ProductRequest,
@@ -179,6 +192,7 @@ impl ExpectedSource {
 }
 
 pub fn run() {
+    let explorer = explorer_entry::ExplorerEntry::from_args(std::env::args_os().skip(1));
     let webview_data_directory = match host::prepare_process_environment() {
         Ok(path) => path,
         Err(error) => {
@@ -195,6 +209,7 @@ pub fn run() {
     let runtime = BridgeRuntime::start();
     tauri::Builder::default()
         .manage(runtime)
+        .manage(explorer)
         .manage(limited_inspection::LimitedInspectionRuntime::default())
         .setup(move |app| {
             let window =
@@ -225,6 +240,7 @@ pub fn run() {
             bridge_inspect_limited,
             bridge_select_image,
             bridge_read_image,
+            bridge_take_explorer_request,
             bridge_product_operation
         ])
         .build(tauri::generate_context!())

@@ -508,6 +508,55 @@ await nativeFailure.select();await nativeFailure.nodes.addButton.fire("click");
 check(nativeFailure.nodes.statusLine.textContent.includes("追加できません") && nativeFailure.nodes.rightsIntent.hidden,"native Add failure never collapses to selected-image status or success");
 nativeFailure.app.destroy();
 
+// Real shared bootstrap: Explorer intent is not an applied-mark claim. No native
+// executable/registry mutation; image load and async handoff are explicit signals.
+for (const extension of ["png", "jpeg"]) {
+  for (const operation of ["add", "limited_inspect"]) {
+    const adapter = new ProductTestAdapter(null);
+    adapter.marked = false;
+    let takes = 0;
+    adapter.takeExplorerRequest = async()=>{ takes++; return {operation,image:{name:`日本語 image.${extension}`,url:"data:image/png;base64,AA==",reference:`C:/work/日本語 image.${extension}`}}; };
+    const ui = setup(adapter);
+    await ui.app.consumeExplorerEntry(); await ui.app.consumeExplorerEntry();
+    check(takes === 1 && adapter.calls.length === 0,"Explorer intent once; no action before image decodes");
+    ui.nodes.previewImage.onload();
+    await Promise.resolve();
+    if (operation === "add") {
+      check(ui.nodes.markDialog.open && ui.nodes.handwrittenTab.attributes["aria-selected"] === "true","Explorer Add without saved mark opens handwritten configuration");
+      check(adapter.calls.length === 0,"no invented mark or premature Add");
+      await ui.draw(); await ui.save();
+      check(adapter.calls.length === 1 && adapter.calls[0].kind === "add","Explorer continues existing Add after explicit mark save");
+    } else {
+      check(adapter.calls.length === 1 && adapter.calls[0].kind === "verify","Explorer Verify enters existing flow without requesting mark");
+      check(ui.nodes.rightsIntent.hidden && !ui.nodes.markDialog.open,"unmarked Explorer image has no false intent/mark dialog");
+    }
+    ui.app.destroy();
+  }
+}
+const savedEntry = setup(new ProductTestAdapter());
+savedEntry.adapter.takeExplorerRequest = async()=>({operation:"add",image:{name:"saved.png",url:"data:image/png;base64,AA==",reference:"C:/saved.png"}});
+await savedEntry.app.consumeExplorerEntry(); savedEntry.nodes.previewImage.onload(); await Promise.resolve();
+check(savedEntry.adapter.calls.length === 1 && !savedEntry.nodes.markDialog.open,"Explorer Add reuses available session mark");
+savedEntry.app.destroy();
+const lateEntry = setup(new ProductTestAdapter());
+let resolveEntry;
+lateEntry.adapter.takeExplorerRequest = ()=>new Promise(resolve=>{resolveEntry=resolve;});
+const pendingEntry = lateEntry.app.consumeExplorerEntry();
+check(lateEntry.nodes.addButton.disabled && lateEntry.nodes.verifyButton.disabled,"startup handoff locks action selection while pending");
+lateEntry.app.destroy(); resolveEntry({operation:"add",image:{name:"late.png",url:"data:image/png;base64,AA=="}});
+await pendingEntry;
+check(lateEntry.adapter.calls.length === 0 && !lateEntry.nodes.markDialog.open,"destroyed startup cannot dispatch late image");
+const failedExplorerEntry = setup(new ProductTestAdapter());
+failedExplorerEntry.adapter.takeExplorerRequest = async()=>{throw new Error("EXPLORER_DUPLICATE");};
+await failedExplorerEntry.app.consumeExplorerEntry();
+check(failedExplorerEntry.adapter.calls.length === 0 && failedExplorerEntry.nodes.rightsIntent.hidden && !failedExplorerEntry.nodes.statusLine.hidden,"invalid/duplicate native entry is visible failure, not product success");
+failedExplorerEntry.app.destroy();
+const corruptExplorerEntry = setup(new ProductTestAdapter());
+corruptExplorerEntry.adapter.takeExplorerRequest = async()=>({operation:"add",image:{name:"corrupt.png",url:"data:image/png;base64,AA=="}});
+await corruptExplorerEntry.app.consumeExplorerEntry(); corruptExplorerEntry.nodes.previewImage.onerror();
+check(corruptExplorerEntry.adapter.calls.length === 0 && corruptExplorerEntry.nodes.rightsIntent.hidden && !corruptExplorerEntry.nodes.markDialog.open,"malformed image decode never enters Explorer Add/Verify");
+corruptExplorerEntry.app.destroy();
+
 const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 check(css.includes("--motion-dissolve-at: 4300ms") && css.includes("--motion-dissolve-duration: 900ms") && flow.delays.includes(5250), "draw/recognize/hold/diffuse/quiet finish use recovered 5.25s schedule");
 for (const name of ["core-absorb", "glow-absorb", "diffusion-absorb"]) {

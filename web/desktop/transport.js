@@ -13,6 +13,7 @@ export function createDesktopTransport(windowRef) {
     loadPersonalMark: () => call("bridge_load_personal_mark"),
     inspectLimited: (request) => call("bridge_inspect_limited", { request }),
     selectImage: () => call("bridge_select_image"),
+    takeExplorerRequest: () => call("bridge_take_explorer_request"),
     readImage: (inputPath) => call("bridge_read_image", { inputPath }),
     productOperation: (request) => call("bridge_product_operation", { request }),
   });

@@ -11,6 +11,7 @@ fn main() {
             "bridge_inspect_limited",
             "bridge_select_image",
             "bridge_read_image",
+            "bridge_take_explorer_request",
             "bridge_product_operation",
         ]))
         .windows_attributes(

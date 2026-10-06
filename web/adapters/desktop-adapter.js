@@ -11,6 +11,19 @@ export class DesktopAdapter extends BrowserFoundationAdapter {
   #productFlow = false;
   #selected = null;
   #active = false;
+  #explorerConsumed = false;
+
+  async takeExplorerRequest() {
+    if (this.#explorerConsumed) return null;
+    this.#explorerConsumed = true; // errors/cancellation cannot replay a launch intent
+    if (!this.#productFlow || this.#active || typeof this.#transport.takeExplorerRequest !== "function") throw new DesktopBridgeError("PRODUCT_UNAVAILABLE");
+    const value = await this.#transport.takeExplorerRequest();
+    if (value === null) return null;
+    if (!value || Object.keys(value).sort().join(",") !== "image,operation"
+      || !["add", "limited_inspect"].includes(value.operation)) throw new DesktopBridgeError("INVALID_EXPLORER_REQUEST");
+    this.#selected = validateImageRecord(value.image, { maximum:(value.operation === "limited_inspect" ? 64 : 32)*1024*1024 });
+    return { operation: value.operation, image: this.#selected };
+  }
 
   constructor(transport, { productFlow = false } = {}) {
     super();

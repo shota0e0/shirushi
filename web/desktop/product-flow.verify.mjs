@@ -67,4 +67,31 @@ await assert.rejects(()=>adapter.addMark({targetReference:record.reference,mark}
 check(calls.filter(c=>c.operation==="add").length===1,"old target cannot replay writer");
 next={operation:"add",result:"ADD_FAILED",errorCode:"INPUT_UNAVAILABLE"};
 await assert.rejects(()=>adapter.addMark({targetReference:outputRecord.reference,mark}));checks++;
+for (const operation of ["add", "limited_inspect"]) {
+  let consumed = 0;
+  const entry = new DesktopAdapter({...transport, takeExplorerRequest:async()=>{
+    consumed++; return {operation,image:record};
+  }},{productFlow:true});
+  check((await entry.takeExplorerRequest()).image.reference === record.reference,"Explorer preserves exact validated image identity");
+  check(await entry.takeExplorerRequest() === null && consumed === 1,"Explorer request consumed once");
+  next = operation === "add" ? add : inspection();
+  const outcome = operation === "add" ? await entry.addMark({targetReference:record.reference,mark})
+    : await entry.verifyFileMark({targetReference:record.reference});
+  check(operation === "add" ? outcome.status === "SUCCESS" : !outcome.intentPresent,"Explorer uses existing Add/real absent verification contract");
+}
+for (const value of [{operation:"verify",image:record},{operation:"add",image:record,extra:true},
+  {operation:"add",image:{...record,reference:"../bad.png"}}]) {
+  let consumed = 0;
+  const entry = new DesktopAdapter({...transport,takeExplorerRequest:async()=>{consumed++;return value;}},{productFlow:true});
+  await assert.rejects(()=>entry.takeExplorerRequest()); checks++;
+  check(await entry.takeExplorerRequest() === null && consumed === 1,"malformed handoff cannot retry");
+}
+for (const operation of ["add", "limited_inspect"]) {
+  const value = {...record,size:64*1024*1024};
+  const entry = new DesktopAdapter({...transport,takeExplorerRequest:async()=>({operation,image:value})},{productFlow:true});
+  if (operation === "add") { await assert.rejects(()=>entry.takeExplorerRequest()); checks++; }
+  else check((await entry.takeExplorerRequest()).image.size === value.size,"Explorer Verify preserves existing generated-image 64MiB limit");
+  const overflow = new DesktopAdapter({...transport,takeExplorerRequest:async()=>({operation,image:{...value,size:value.size+1}})},{productFlow:true});
+  await assert.rejects(()=>overflow.takeExplorerRequest());checks++;
+}
 console.log(`Product Flow: ${checks} checks PASS (synthetic transport only; no native execution)`);

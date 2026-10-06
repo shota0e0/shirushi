@@ -32,6 +32,29 @@ export function bootstrapShirushi({ root, adapter, presentation = null, windowRe
     selectionPending: false, selectionAction: null, editorContinuation: null, destroyed: false,
     appliedResult: null,
   };
+  let explorerConsumed = false;
+
+  // Desktop-only startup handoff. Reuse normal image decoding and action guards;
+  // never infer applied state from an Explorer request or a filename.
+  async function consumeExplorerEntry() {
+    if (explorerConsumed) return;
+    explorerConsumed = true;
+    if (state.destroyed || state.image || state.selectionPending || state.imageLoading
+      || state.operationPending || typeof adapter.takeExplorerRequest !== "function") return;
+    state.selectionPending = true;
+    refreshActions();
+    try {
+      const request = await adapter.takeExplorerRequest();
+      if (state.destroyed) return;
+      cancelSelection();
+      if (request !== null) {
+        if (!request || !["add", "limited_inspect"].includes(request.operation)) throw new TypeError("INVALID_EXPLORER_REQUEST");
+        setImage(request.image, request.operation === "add" ? "add" : "verify");
+      }
+    } catch {
+      if (!state.destroyed) { cancelSelection(); failImageLoad(); }
+    }
+  }
 
   function setStatus(key) {
     state.statusKey = key;
@@ -395,7 +418,7 @@ export function bootstrapShirushi({ root, adapter, presentation = null, windowRe
   windowRef.addEventListener("beforeunload", destroy);
 
   resetMotionVisuals(); applyTranslations(); renderMarkPreview(); setStatus(state.statusKey);
-  return Object.freeze({ capabilities: adapter.capabilities, refreshPresentation: applyTranslations, destroy });
+  return Object.freeze({ capabilities: adapter.capabilities, refreshPresentation: applyTranslations, consumeExplorerEntry, destroy });
 }
 
 export function markPreviewText(mark, translate) {

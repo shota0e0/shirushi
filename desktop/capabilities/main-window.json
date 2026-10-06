@@ -10,6 +10,7 @@
     "allow-bridge-inspect-limited",
     "allow-bridge-select-image",
     "allow-bridge-read-image",
+    "allow-bridge-take-explorer-request",
     "allow-bridge-product-operation"
   ]
 }

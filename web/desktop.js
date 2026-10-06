@@ -17,4 +17,5 @@ const presentation = {
   },
 };
 const app = bootstrapShirushi({ root: document.querySelector("#app"), adapter, presentation });
+void app.consumeExplorerEntry();
 window.addEventListener("beforeunload", () => app.destroy(), { once: true });
