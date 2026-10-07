@@ -722,8 +722,50 @@ jobs:
           MANIFEST = 'inspection-helper.manifest.json'
           DOCS = ('README.md','DISCLAIMER.md','PRIVACY.md','THIRD_PARTY_NOTICES.md')
           MAX = 268435456
+          WIZARD_PATH = '$PLUGINSDIR/modern-wizard.bmp'
+          WIZARD_SOURCE = dict(repository='NSIS-Dev/nsis',version='v311',commit='7359413009afd4f0fff472d841fc2f2cc0e0a5f8',path='Contrib/Graphics/Wizard/win.bmp',gitBlob='5524eef945119e421d076d8fa9f8ded1205c1021')
+          WIZARD_SIZE, WIZARD_SHA256 = 26494, '3ad2dc318056d0a2024af1804ea741146cfc18cc404649a44610cbf8b2056cf2'
           def require(ok, code):
               if not ok: raise ValueError(code)
+          def verify_wizard(path,raw):
+              require(path==WIZARD_PATH,'PREVIEW_WIZARD_PATH_MISMATCH')
+              require(len(raw)==WIZARD_SIZE and raw[:2]==b'BM' and hashlib.sha256(raw).hexdigest()==WIZARD_SHA256,'PREVIEW_WIZARD_CONTENT_MISMATCH')
+              return dict(classification='TAURI_NSIS_KNOWN_IMPLEMENTATION_DETAIL',path=path,size=len(raw),sha256=WIZARD_SHA256,source=WIZARD_SOURCE)
+          def archive_sizes(entries,files):
+              require('uninstall.exe' in files,'PREVIEW_UNINSTALLER_MISSING_OR_NOT_FILE')
+              sizes={}
+              for path,fields in entries:
+                  raw=fields.get('Size')
+                  if raw is None or raw.strip()=='':
+                      require(path=='uninstall.exe','PREVIEW_ARCHIVE_SIZE_NOT_REPORTED')
+                      sizes[path]=dict(state='UNKNOWN_NOT_REPORTED',size=None,raw=raw)
+                  else:
+                      require(re.fullmatch(r'[0-9]+',raw) is not None,'PREVIEW_ARCHIVE_SIZE_MALFORMED')
+                      size=int(raw); require(size<=MAX,'PREVIEW_ARCHIVE_FILE_BOUND')
+                      sizes[path]=dict(state='KNOWN',size=size,raw=raw)
+              require(sum(item['size'] for item in sizes.values() if item['size'] is not None)<=536870912,'PREVIEW_ARCHIVE_TOTAL_BOUND')
+              return sizes
+          def verify_extracted_sizes(sizes,files,actual):
+              require(set(actual)==files,'PREVIEW_EXTRACTED_FILE_INVENTORY_MISMATCH')
+              for path,identity in actual.items():
+                  require(0<identity['size']<=MAX,'PREVIEW_EXTRACTED_FILE_BOUND')
+                  require(sizes[path]['size'] is None or identity['size']==sizes[path]['size'],'PREVIEW_EXTRACTED_LISTING_SIZE_MISMATCH')
+              require(sum(item['size'] for item in actual.values())<=536870912,'PREVIEW_EXTRACTED_TOTAL_BOUND')
+          def archive_audit_selftests(wizard_raw):
+              verify_wizard(WIZARD_PATH,wizard_raw)
+              blank=archive_sizes([('uninstall.exe',{'Size':''})],{'uninstall.exe'})
+              require(blank['uninstall.exe']==dict(state='UNKNOWN_NOT_REPORTED',size=None,raw=''),'PREVIEW_ARCHIVE_SELFTEST')
+              missing=archive_sizes([('uninstall.exe',{})],{'uninstall.exe'})
+              require(missing['uninstall.exe']['size'] is None and missing['uninstall.exe']['state']=='UNKNOWN_NOT_REPORTED','PREVIEW_ARCHIVE_SELFTEST')
+              verify_extracted_sizes(blank,{'uninstall.exe'},{'uninstall.exe':dict(size=123,sha256='0'*64)})
+              rejected=0
+              cases=(lambda:verify_wizard(WIZARD_PATH,wizard_raw[:-1]+bytes([wizard_raw[-1]^1])),lambda:verify_wizard('$PLUGINSDIR/other.bmp',wizard_raw),lambda:verify_wizard('modern-wizard.bmp',wizard_raw),lambda:verify_wizard(WIZARD_PATH,b'BM'+b'X'*(WIZARD_SIZE-2)),lambda:archive_sizes([('other.exe',{'Size':''}),('uninstall.exe',{'Size':''})],{'other.exe','uninstall.exe'}),lambda:archive_sizes([('uninstall.exe',{'Size':'bad'})],{'uninstall.exe'}),lambda:archive_sizes([('uninstall.exe',{'Size':str(MAX+1)})],{'uninstall.exe'}),lambda:archive_sizes([],set()),lambda:archive_sizes([('uninstall.exe',{'Size':'0','Folder':'+'})],set()),lambda:verify_extracted_sizes(blank,{'uninstall.exe'},{'uninstall.exe':dict(size=MAX+1)}),lambda:verify_extracted_sizes({'uninstall.exe':dict(size=2)},{'uninstall.exe'},{'uninstall.exe':dict(size=3)}),lambda:verify_extracted_sizes(blank,{'uninstall.exe'},{'uninstall.exe':dict(size=123),'extra.exe':dict(size=1)}))
+              for case in cases:
+                  try: case()
+                  except ValueError: rejected+=1
+                  else: require(False,'PREVIEW_ARCHIVE_SELFTEST_ACCEPTED_TAMPER')
+              require(rejected==12,'PREVIEW_ARCHIVE_SELFTEST')
+              print('PREVIEW_ARCHIVE_AUDIT_SELFTEST: PASS; FIXED_WIZARD_BYTES; UNINSTALLER_UNKNOWN_NOT_ZERO; 12_NEGATIVE_CASES; NO_PROCESS_EXECUTION')
           def unique(pairs):
               value = {}
               for key, item in pairs:
@@ -872,21 +914,28 @@ jobs:
               entries.append((path,fields)); require(len(entries)<=64,'PREVIEW_ARCHIVE_INVENTORY_BOUND')
           payload=set((*NATIVE,MANIFEST,*DOCS)); files={p for p,f in entries if f.get('Folder')!='+'}
           require(payload<=files,'PREVIEW_ARCHIVE_PAYLOAD_MISSING')
-          if not all(p in payload or p=='uninstall.exe' or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files):
+          if not all(p in payload or p=='uninstall.exe' or p==WIZARD_PATH or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files):
               def diagnostic_text(value,limit=4096):
                   return None if value is None else dict(text=value[:limit],rawLength=len(value),truncated=len(value)>limit)
               observed=[]
               for p,f in entries:
-                  predicates=dict(exactPayload=p in payload,exactUninstaller=p=='uninstall.exe',pluginDllRegex=bool(re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p)))
+                  predicates=dict(exactPayload=p in payload,exactUninstaller=p=='uninstall.exe',exactWizardCandidate=p==WIZARD_PATH,pluginDllRegex=bool(re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p)))
                   treated_as_file=f.get('Folder')!='+'
                   observed.append(dict(originalPath=diagnostic_text(f.get('Path')),normalizedRelativePath=diagnostic_text(p),Size=diagnostic_text(f.get('Size'),256),Folder=diagnostic_text(f.get('Folder'),256),Attributes=diagnostic_text(f.get('Attributes'),256),treatedAsFile=treated_as_file,allowPredicates=predicates,rejected=treated_as_file and not any(predicates.values())))
-              diagnostic=dict(code='PREVIEW_UNEXPECTED_ARCHIVE_FILE',explanation='File entry matches none of the unchanged exact payload, exact uninstall.exe, or plugin DLL regex predicates; metadata is observation only, not provenance or safety proof.',expectedPayload=sorted(payload),expectedUninstaller='uninstall.exe',expectedPluginRegex=r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',entryCount=len(observed),rejectedEntryIndexes=[i for i,item in enumerate(observed) if item['rejected']],pathCharacterLimit=4096,metadataCharacterLimit=256,entries=observed)
+              diagnostic=dict(code='PREVIEW_UNEXPECTED_ARCHIVE_FILE',explanation='File entry matches none of the exact payload, uninstall.exe, fixed wizard candidate path, or unchanged plugin DLL regex predicates; wizard content verification is still mandatory. Metadata is observation only, not provenance or safety proof.',expectedPayload=sorted(payload),expectedUninstaller='uninstall.exe',expectedWizardCandidate=dict(path=WIZARD_PATH,size=WIZARD_SIZE,sha256=WIZARD_SHA256,contentVerification='REQUIRED_AFTER_EXTRACTION'),expectedPluginRegex=r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',entryCount=len(observed),rejectedEntryIndexes=[i for i,item in enumerate(observed) if item['rejected']],pathCharacterLimit=4096,metadataCharacterLimit=256,entries=observed)
               print('PREVIEW_ARCHIVE_REJECTION_DIAGNOSTIC: '+json.dumps(diagnostic,ensure_ascii=True,separators=(',',':')),flush=True)
-          require(all(p in payload or p=='uninstall.exe' or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files),'PREVIEW_UNEXPECTED_ARCHIVE_FILE')
-          require(sum(int(f.get('Size','0')) for p,f in entries)<=536870912,'PREVIEW_ARCHIVE_TOTAL_BOUND')
+          require(all(p in payload or p=='uninstall.exe' or p==WIZARD_PATH or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files),'PREVIEW_UNEXPECTED_ARCHIVE_FILE')
+          require(WIZARD_PATH in files,'PREVIEW_WIZARD_MISSING')
+          listing_sizes=archive_sizes(entries,files)
           extracted=WORK/'extracted'; require(not extracted.exists(),'PREVIEW_EXTRACT_EXISTS')
           run([str(seven),'x','-y','-sccUTF-8','-o'+str(extracted),str(installer)],'extract')
           for p in extracted.rglob('*'): regular(p,p.is_dir())
+          actual_files={p.relative_to(extracted).as_posix():measure(p) for p in extracted.rglob('*') if p.is_file()}
+          verify_extracted_sizes(listing_sizes,files,actual_files)
+          expected_directories={'/'.join(path.split('/')[:i]) for path in files for i in range(1,len(path.split('/')))}
+          require(all(p.relative_to(extracted).as_posix() in expected_directories for p in extracted.rglob('*') if p.is_dir()),'PREVIEW_EXTRACTED_DIRECTORY_INVENTORY_MISMATCH')
+          wizard_raw=(extracted/WIZARD_PATH).read_bytes(); wizard_identity=verify_wizard(WIZARD_PATH,wizard_raw)
+          archive_audit_selftests(wizard_raw)
           nsis_desktop=measure(extracted/NATIVE[0],machine=0x8664,subsystem=2)
           verify_nsis_desktop((extracted/NATIVE[0]).read_bytes(),expected_desktop,desktop_patch)
           require(nsis_desktop=={key:desktop_patch[key] for key in ('size','sha256')},'PREVIEW_EXTRACTED_DESKTOP_IDENTITY_MISMATCH')
@@ -899,7 +948,7 @@ jobs:
           for name in DOCS: shutil.copyfile(prepared/'notices'/name,artifact/name)
           shutil.copyfile(installer,artifact/installer.name)
           identities={name:measure(artifact/name,4096 if name==MANIFEST else 262144 if name in DOCS else MAX) for name in (*NATIVE,MANIFEST,*DOCS,installer.name)}
-          audit=dict(schemaVersion=1,classification='V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],profile='release',features=['preview-release'],target='x86_64-pc-windows-msvc',tauriCli='2.11.3',compiledManifestSha256=digest,manifest=manifest,files=identities,releaseHelperProtocol='PNG_JPEG_UNMARKED_ADD_INSPECT_PASS',rawNativeBytesRestored=True,rawDesktop=before[NATIVE[0]],nsisDesktop=nsis_desktop,desktopBundlePatch=desktop_patch,nsisDesktopMatchesExpectedPatch=True,hookIncluded=True,nsisStaticExtraction='PASS',setupExecution=0,uninstallExecution=0,ordinaryUiExecution=0,vendorInstallerExecution=0,signing='NOT_RUN',productionTrust=False,cleanWindowsValidation='NOT_RUN',runtimeIdentityScope='API_AVAILABILITY_ONLY_NOT_EXACT_RUNTIME_IDENTITY')
+          audit=dict(schemaVersion=1,classification='V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],profile='release',features=['preview-release'],target='x86_64-pc-windows-msvc',tauriCli='2.11.3',compiledManifestSha256=digest,manifest=manifest,files=identities,releaseHelperProtocol='PNG_JPEG_UNMARKED_ADD_INSPECT_PASS',rawNativeBytesRestored=True,rawDesktop=before[NATIVE[0]],nsisDesktop=nsis_desktop,desktopBundlePatch=desktop_patch,nsisDesktopMatchesExpectedPatch=True,nsisWizardResource=wizard_identity,uninstaller=dict(listing=listing_sizes['uninstall.exe'],actual=actual_files['uninstall.exe']),archiveActualTotalBytes=sum(item['size'] for item in actual_files.values()),hookIncluded=True,nsisStaticExtraction='PASS',setupExecution=0,uninstallExecution=0,ordinaryUiExecution=0,vendorInstallerExecution=0,signing='NOT_RUN',productionTrust=False,cleanWindowsValidation='NOT_RUN',runtimeIdentityScope='API_AVAILABILITY_ONLY_NOT_EXACT_RUNTIME_IDENTITY')
           (artifact/'preview-audit.json').write_bytes(canonical(audit)+b'\n')
           require({p.name for p in artifact.iterdir()}==set((*identities,'preview-audit.json')),'PREVIEW_PUBLIC_ARTIFACT_INVENTORY')
           print('PREVIEW_NATIVE_NSIS_AUDIT: '+canonical(audit).decode('ascii'))
