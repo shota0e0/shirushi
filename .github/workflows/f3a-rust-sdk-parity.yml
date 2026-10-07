@@ -732,6 +732,36 @@ jobs:
           def strict(raw):
               return json.loads(raw, object_pairs_hook=unique, parse_constant=lambda value: require(False,'PREVIEW_JSON_CONSTANT'))
           def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode('ascii')
+          def expected_nsis_desktop(raw):
+              # Tauri CLI 2.11.3 tauri-bundler/src/bundle.rs patches the first
+              # UNK token only; no other byte, PE field or length is exempt.
+              old,new=b'__TAURI_BUNDLE_TYPE_VAR_UNK',b'__TAURI_BUNDLE_TYPE_VAR_NSS'
+              offset=raw.find(old)
+              require(offset>=0 and len(old)==len(new),'PREVIEW_BUNDLE_TOKEN_MISSING')
+              expected=raw[:offset]+new+raw[offset+len(old):]
+              return expected,dict(model='TAURI_2_11_3_FIRST_BUNDLE_TOKEN_ONLY',offset=offset,length=len(old),beforeToken=old.decode('ascii'),afterToken=new.decode('ascii'),size=len(expected),sha256=hashlib.sha256(expected).hexdigest())
+          def verify_nsis_desktop(actual,expected,patch):
+              require(len(actual)==patch['size'] and actual==expected and hashlib.sha256(actual).hexdigest()==patch['sha256'],'PREVIEW_EXTRACTED_DESKTOP_PATCH_MISMATCH')
+          def bundle_patch_selftests():
+              old,new=b'__TAURI_BUNDLE_TYPE_VAR_UNK',b'__TAURI_BUNDLE_TYPE_VAR_NSS'
+              raw=b'prefix'+old+b'middle'+old+b'suffix'
+              expected,patch=expected_nsis_desktop(raw)
+              require(expected==b'prefix'+new+b'middle'+old+b'suffix' and patch['offset']==6,'PREVIEW_PATCH_MODEL_SELFTEST')
+              verify_nsis_desktop(expected,expected,patch)
+              rejected=0
+              for invalid in (raw,raw.replace(old,new),raw[:6]+old+b'middle'+new+b'suffix',b'X'+expected[1:],expected+b'X',expected[:-1]):
+                  try: verify_nsis_desktop(invalid,expected,patch)
+                  except ValueError as error:
+                      require(str(error)=='PREVIEW_EXTRACTED_DESKTOP_PATCH_MISMATCH','PREVIEW_PATCH_MODEL_SELFTEST'); rejected+=1
+                  else: require(False,'PREVIEW_PATCH_MODEL_ACCEPTED_TAMPER')
+              for invalid in (b'no bundle marker',b'prefix'+new+b'suffix'):
+                  try: expected_nsis_desktop(invalid)
+                  except ValueError as error:
+                      require(str(error)=='PREVIEW_BUNDLE_TOKEN_MISSING','PREVIEW_PATCH_MODEL_SELFTEST'); rejected+=1
+                  else: require(False,'PREVIEW_PATCH_MODEL_ACCEPTED_MISSING_TOKEN')
+              require(rejected==8,'PREVIEW_PATCH_MODEL_SELFTEST')
+              print('PREVIEW_BUNDLE_PATCH_SELFTEST: PASS; FIRST_TOKEN_ONLY; 8_NEGATIVE_CASES; NO_PROCESS_EXECUTION')
+          bundle_patch_selftests()
           def regular(path, directory=False):
               for item in (path,*path.parents):
                   info=item.lstat()
@@ -765,6 +795,9 @@ jobs:
               return out.read_bytes()
           WORK=RUNNER/'shirushi-v02-preview-validation'; require(not WORK.exists(),'PREVIEW_WORK_EXISTS'); WORK.mkdir()
           before={name:measure(RELEASE/name,machine=0x8664,subsystem=2 if name==NATIVE[0] else 3) for name in NATIVE}
+          native_raw={name:(RELEASE/name).read_bytes() for name in NATIVE}
+          require({name:dict(size=len(raw),sha256=hashlib.sha256(raw).hexdigest()) for name,raw in native_raw.items()}==before,'PREVIEW_RAW_NATIVE_INPUT_CHANGED')
+          expected_desktop,desktop_patch=expected_nsis_desktop(native_raw[NATIVE[0]])
           manifest_raw=Path(os.environ['PREVIEW_TRUSTED_MANIFEST']).read_bytes(); require(0<len(manifest_raw)<=4096,'PREVIEW_MANIFEST_BOUND')
           manifest={'schemaVersion':1,'relativePath':NATIVE[1],'size':before[NATIVE[1]]['size'],'sha256':before[NATIVE[1]]['sha256'],'protocolVersion':1}
           require(strict(manifest_raw)==manifest and manifest_raw==canonical(manifest),'PREVIEW_MANIFEST_IDENTITY')
@@ -811,6 +844,7 @@ jobs:
           require(not (RELEASE/'bundle/nsis').exists(),'PREVIEW_INSTALLER_OUTPUT_EXISTS')
           run(['cargo','+1.88.0','tauri','bundle','--ci','--no-sign','--target','x86_64-pc-windows-msvc','--features','preview-release','--bundles','nsis','--config',str(prepared/'tauri-preview.generated.json')],'bundle',900,cwd=ROOT/'desktop')
           require({name:measure(RELEASE/name) for name in NATIVE}==before,'PREVIEW_BUNDLER_MUTATED_NATIVE_BYTES')
+          require(all((RELEASE/name).read_bytes()==native_raw[name] for name in NATIVE),'PREVIEW_BUNDLER_DID_NOT_RESTORE_RAW_BYTES')
           installers=list((RELEASE/'bundle/nsis').glob('*.exe')); require(len(installers)==1,'PREVIEW_INSTALLER_COUNT')
           installer=installers[0]; installer_identity=measure(installer)
           require(installer.name=='Shirushi Preview_0.2.0-preview.1_x64-setup.exe','PREVIEW_UNEXPECTED_INSTALLER_NAME')
@@ -843,7 +877,10 @@ jobs:
           extracted=WORK/'extracted'; require(not extracted.exists(),'PREVIEW_EXTRACT_EXISTS')
           run([str(seven),'x','-y','-sccUTF-8','-o'+str(extracted),str(installer)],'extract')
           for p in extracted.rglob('*'): regular(p,p.is_dir())
-          require({name:measure(extracted/name) for name in NATIVE}==before and (extracted/MANIFEST).read_bytes()==manifest_raw,'PREVIEW_EXTRACTED_NATIVE_MISMATCH')
+          nsis_desktop=measure(extracted/NATIVE[0],machine=0x8664,subsystem=2)
+          verify_nsis_desktop((extracted/NATIVE[0]).read_bytes(),expected_desktop,desktop_patch)
+          require(nsis_desktop=={key:desktop_patch[key] for key in ('size','sha256')},'PREVIEW_EXTRACTED_DESKTOP_IDENTITY_MISMATCH')
+          require(measure(extracted/NATIVE[1])==before[NATIVE[1]] and (extracted/NATIVE[1]).read_bytes()==native_raw[NATIVE[1]] and (extracted/MANIFEST).read_bytes()==manifest_raw,'PREVIEW_EXTRACTED_NATIVE_MISMATCH')
           require({name:measure(extracted/name,262144) for name in DOCS}==docs,'PREVIEW_EXTRACTED_NOTICES_MISMATCH')
           # Retain only allowlisted public outputs, never private generated paths,
           # NSIS tools/plugins/uninstaller extraction, PDBs, logs or credentials.
@@ -852,7 +889,7 @@ jobs:
           for name in DOCS: shutil.copyfile(prepared/'notices'/name,artifact/name)
           shutil.copyfile(installer,artifact/installer.name)
           identities={name:measure(artifact/name,4096 if name==MANIFEST else 262144 if name in DOCS else MAX) for name in (*NATIVE,MANIFEST,*DOCS,installer.name)}
-          audit=dict(schemaVersion=1,classification='V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],profile='release',features=['preview-release'],target='x86_64-pc-windows-msvc',tauriCli='2.11.3',compiledManifestSha256=digest,manifest=manifest,files=identities,releaseHelperProtocol='PNG_JPEG_UNMARKED_ADD_INSPECT_PASS',nativeBytesUnchanged=True,hookIncluded=True,nsisStaticExtraction='PASS',setupExecution=0,uninstallExecution=0,ordinaryUiExecution=0,vendorInstallerExecution=0,signing='NOT_RUN',productionTrust=False,cleanWindowsValidation='NOT_RUN',runtimeIdentityScope='API_AVAILABILITY_ONLY_NOT_EXACT_RUNTIME_IDENTITY')
+          audit=dict(schemaVersion=1,classification='V02_PREVIEW_NATIVE_NSIS_STATIC_AUDIT_PASS',sourceCommit=os.environ['GITHUB_SHA'],runId=os.environ['GITHUB_RUN_ID'],profile='release',features=['preview-release'],target='x86_64-pc-windows-msvc',tauriCli='2.11.3',compiledManifestSha256=digest,manifest=manifest,files=identities,releaseHelperProtocol='PNG_JPEG_UNMARKED_ADD_INSPECT_PASS',rawNativeBytesRestored=True,rawDesktop=before[NATIVE[0]],nsisDesktop=nsis_desktop,desktopBundlePatch=desktop_patch,nsisDesktopMatchesExpectedPatch=True,hookIncluded=True,nsisStaticExtraction='PASS',setupExecution=0,uninstallExecution=0,ordinaryUiExecution=0,vendorInstallerExecution=0,signing='NOT_RUN',productionTrust=False,cleanWindowsValidation='NOT_RUN',runtimeIdentityScope='API_AVAILABILITY_ONLY_NOT_EXACT_RUNTIME_IDENTITY')
           (artifact/'preview-audit.json').write_bytes(canonical(audit)+b'\n')
           require({p.name for p in artifact.iterdir()}==set((*identities,'preview-audit.json')),'PREVIEW_PUBLIC_ARTIFACT_INVENTORY')
           print('PREVIEW_NATIVE_NSIS_AUDIT: '+canonical(audit).decode('ascii'))

@@ -20,6 +20,11 @@ name = "shirushi-canary-runner"
 path = "src/bin/shirushi-canary-runner.rs"
 required-features = ["manual-canary"]
 
+[[bin]]
+name = "shirushi-limited-canary"
+path = "src/bin/shirushi-limited-canary.rs"
+required-features = ["manual-canary"]
+
 [features]
 default = []
 manual-canary = ["tauri/custom-protocol"]
