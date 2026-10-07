@@ -872,6 +872,16 @@ jobs:
               entries.append((path,fields)); require(len(entries)<=64,'PREVIEW_ARCHIVE_INVENTORY_BOUND')
           payload=set((*NATIVE,MANIFEST,*DOCS)); files={p for p,f in entries if f.get('Folder')!='+'}
           require(payload<=files,'PREVIEW_ARCHIVE_PAYLOAD_MISSING')
+          if not all(p in payload or p=='uninstall.exe' or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files):
+              def diagnostic_text(value,limit=4096):
+                  return None if value is None else dict(text=value[:limit],rawLength=len(value),truncated=len(value)>limit)
+              observed=[]
+              for p,f in entries:
+                  predicates=dict(exactPayload=p in payload,exactUninstaller=p=='uninstall.exe',pluginDllRegex=bool(re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p)))
+                  treated_as_file=f.get('Folder')!='+'
+                  observed.append(dict(originalPath=diagnostic_text(f.get('Path')),normalizedRelativePath=diagnostic_text(p),Size=diagnostic_text(f.get('Size'),256),Folder=diagnostic_text(f.get('Folder'),256),Attributes=diagnostic_text(f.get('Attributes'),256),treatedAsFile=treated_as_file,allowPredicates=predicates,rejected=treated_as_file and not any(predicates.values())))
+              diagnostic=dict(code='PREVIEW_UNEXPECTED_ARCHIVE_FILE',explanation='File entry matches none of the unchanged exact payload, exact uninstall.exe, or plugin DLL regex predicates; metadata is observation only, not provenance or safety proof.',expectedPayload=sorted(payload),expectedUninstaller='uninstall.exe',expectedPluginRegex=r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',entryCount=len(observed),rejectedEntryIndexes=[i for i,item in enumerate(observed) if item['rejected']],pathCharacterLimit=4096,metadataCharacterLimit=256,entries=observed)
+              print('PREVIEW_ARCHIVE_REJECTION_DIAGNOSTIC: '+json.dumps(diagnostic,ensure_ascii=True,separators=(',',':')),flush=True)
           require(all(p in payload or p=='uninstall.exe' or re.fullmatch(r'\$PLUGINSDIR/[A-Za-z0-9_.-]+\.dll',p) for p in files),'PREVIEW_UNEXPECTED_ARCHIVE_FILE')
           require(sum(int(f.get('Size','0')) for p,f in entries)<=536870912,'PREVIEW_ARCHIVE_TOTAL_BOUND')
           extracted=WORK/'extracted'; require(not extracted.exists(),'PREVIEW_EXTRACT_EXISTS')
