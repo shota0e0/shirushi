@@ -752,6 +752,14 @@ jobs:
               out,err=WORK/(name+'.stdout'),WORK/(name+'.stderr')
               with out.open('xb') as stdout,err.open('xb') as stderr:
                   p=subprocess.run(argv,input=input_bytes,stdout=stdout,stderr=stderr,timeout=timeout,cwd=cwd,check=False)
+              if p.returncode!=0:
+                  diagnostic={'processName':name,'returnCode':p.returncode,'encoding':'utf-8','decodeErrors':'replace','tailLimitBytesPerStream':8192,'streams':{}}
+                  for label,path in (('stderr',err),('stdout',out)):
+                      size=path.stat().st_size
+                      with path.open('rb') as stream:
+                          stream.seek(max(0,size-8192)); tail=stream.read(8192)
+                      diagnostic['streams'][label]={'totalBytes':size,'retainedTailBytes':len(tail),'truncated':size>8192,'tail':tail.decode('utf-8','replace')}
+                  print('PREVIEW_PROCESS_DIAGNOSTIC: '+json.dumps(diagnostic,ensure_ascii=True,separators=(',',':')),flush=True)
               require(p.returncode==0,'PREVIEW_PROCESS_FAILED_'+name.upper())
               require(out.stat().st_size<=2097152 and err.stat().st_size<=2097152,'PREVIEW_LOG_BOUND')
               return out.read_bytes()
@@ -761,6 +769,7 @@ jobs:
           manifest={'schemaVersion':1,'relativePath':NATIVE[1],'size':before[NATIVE[1]]['size'],'sha256':before[NATIVE[1]]['sha256'],'protocolVersion':1}
           require(strict(manifest_raw)==manifest and manifest_raw==canonical(manifest),'PREVIEW_MANIFEST_IDENTITY')
           digest=hashlib.sha256(manifest_raw).hexdigest(); require(digest==os.environ['SHIRUSHI_PREVIEW_INSPECTION_MANIFEST_SHA256'],'PREVIEW_COMPILED_DIGEST_CHANGED')
+          print('PREVIEW_NATIVE_INPUT_IDENTITIES: '+json.dumps({'files':before,'compiledManifestSha256':digest,'canonicalManifest':manifest},ensure_ascii=True,separators=(',',':')),flush=True)
           # Exercise the exact release helper over its real one-shot protocol.
           # These CI-only subprocesses never launch Desktop, setup or vendors.
           counter=0
